@@ -93,7 +93,7 @@ def inject_css() -> None:
             color: #0E241B !important;
         }
         .main { background: linear-gradient(160deg, #EEF1F0 0%, #E4E9E6 100%) !important; }
-        .main .block-container { padding: 100px !important; max-width: 100% !important; }
+        .main .block-container { padding: 0 !important; max-width: 100% !important; }
 
         /* ── SIDEBAR SHELL ──────────────────────────────────────
            Outer sidebar is transparent; the inner wrapper carries
@@ -111,14 +111,20 @@ def inject_css() -> None:
             background: linear-gradient(180deg, #E9F2ED 0%, #DCEBE3 100%);
             border-right: 2px solid #1FA463;
             border-radius: 0 24px 24px 0;
-            padding-top: 1rem !important;
+            padding-top: 0 !important;
         }
         section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] { gap: 0 !important; }
         /* Take Streamlit's built-in sidebar header out of the flow entirely,
            so it can no longer push the banner down or leave a gap above it.
            Its collapse icon is repositioned as a simple button sitting on
            top of the banner's top-right corner. */
-        [data-testid="stSidebarContent"] { position: relative !important; }
+        /* Remove Streamlit's built-in left/right padding on the whole
+           sidebar content area (this was the source of the side gaps
+           around the banner), then restore that padding only for the
+           elements below the banner (filters, buttons, info text). */
+        [data-testid="stSidebarContent"] { padding-left: 0 !important; padding-right: 0 !important; }
+        [data-testid="stSidebarUserContent"] > div { padding-left: 1.1rem !important; padding-right: 1.1rem !important; }
+        [data-testid="stSidebarUserContent"] > div:has(.sb-logo) { padding-left: 0 !important; padding-right: 0 !important; }
         [data-testid="stSidebarHeader"] {
             position: absolute !important;
             top: 8px !important;
@@ -140,8 +146,8 @@ def inject_css() -> None:
 
         [data-testid="stSidebarUserContent"] { padding-top: 0 !important; }
         [data-testid="stSidebarUserContent"] > div:first-child {
-            margin-top: 10px !important;
-            padding-top: 10px !important;
+            margin-top: 0 !important;
+            padding-top: 0 !important;
         }
         [data-testid="stSidebar"] * { color: #0E241B !important; }
         [data-testid="stSidebar"] .stSelectbox label,
@@ -321,7 +327,7 @@ def inject_css() -> None:
         .sb-logo {
             background: linear-gradient(135deg, #0F2E22, #1FA463);
             padding: 1.3rem 1.1rem;
-            margin: -1rem 0rem 1rem 0rem;
+            margin: 0;
             width: 100%;
             border-radius: 0 24px 0 0;
             position: sticky;
@@ -1239,8 +1245,7 @@ def render_result_card(row: pd.Series, is_repeated: bool) -> str:
                     {row['Respondent'] or '—'}
                 </div>
                 <div class="res-meta" style='margin-top:0.3rem;'>
-                    <span class='badge'>{row['Case_Category'] or 'N/A'}</span>
-                    {rep_tag}
+                    <span class='badge'>{row['Case_Category'] or 'N/A'}</span>{rep_tag}
                     <span style='margin-right:0.7rem;'>⚖️ {row['Judge_Short']}</span>
                     <span style='margin-right:0.7rem;'>📁 {row['Section_Clean']}</span>
                     <span>📅 {row['Date_Str']}</span>
