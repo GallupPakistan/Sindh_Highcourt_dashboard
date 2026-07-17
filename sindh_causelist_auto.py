@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Sindh High Court Cause List - Automated Downloader & Parser
-Version 4.0
+Version 4.1 (Non-interactive, GitHub Actions compatible)
 
 Requirements:
     pip install openpyxl PyMuPDF requests
@@ -11,6 +11,12 @@ Description:
     2. Downloads the PDF if not already present
     3. Parses the PDF and extracts case data
     4. Saves everything to an Excel file in the specified folder
+
+Usage:
+    python sindh_causelist_auto.py [output_folder]
+    If output_folder is not given, defaults to "cause_lists" in the current directory.
+    (This removes the interactive input() prompt so it can run unattended
+    in GitHub Actions / Task Scheduler without anyone typing a path.)
 """
 
 import re
@@ -243,15 +249,15 @@ def split_case_blocks(section: dict) -> list:
     current = None
     for line in section["lines"]:
         line = line.rstrip()
-        m    = CASE_START.match(line)
+        m = CASE_START.match(line)
         if m:
             if current:
                 cases.append(current)
             current = {
-                "serial":  m.group(1),
+                "serial": m.group(1),
                 "case_no": m.group(2),
                 "section": section["section"],
-                "lines":   []
+                "lines": []
             }
             continue
         if current is None:
@@ -263,10 +269,10 @@ def split_case_blocks(section: dict) -> list:
 
 
 # -------------------------------------------------------
-# COLLECT ALL CASE BLOCKS ACROSS BENCHES
+# COLLECT ALL CASE BLOCKS FROM ALL BENCHES
 # -------------------------------------------------------
 def collect_case_blocks(benches: list) -> list:
-    """Aggregates all case blocks from all benches and sections."""
+    """Flattens all benches/sections into a single list of case blocks."""
     all_cases = []
     for bench in benches:
         sections = split_sections(bench)
@@ -426,7 +432,7 @@ def save_excel(records: list, output_dir: Path) -> None:
     try:
         wb.save(filename)
     except PermissionError:
-        # If the file is open in Excel, save with a timestamped name
+        # If the file is open elsewhere, save with a timestamped name
         filename = output_dir / (
             "Sindh_Cause_List_"
             + datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -449,10 +455,11 @@ def main():
     print("  Sindh High Court — Cause List Automated Downloader")
     print("=" * 60)
 
-    # 1. Get output folder from user
-    folder_input  = input("\nEnter the folder path to save PDF and Excel: ").strip()
-    folder_input  = folder_input.strip('"').strip("'")
-    output_folder = Path(folder_input)
+    # 1. Get output folder from command-line argument, or default to "cause_lists"
+    #    (No input() prompt here — this lets the script run unattended
+    #    in GitHub Actions or Task Scheduler.)
+    folder_arg    = sys.argv[1] if len(sys.argv) > 1 else "cause_lists"
+    output_folder = Path(folder_arg)
 
     if not output_folder.exists():
         print(f"\n[INFO] Folder does not exist. Creating it ...")
@@ -477,9 +484,10 @@ def main():
 
     if not success:
         print()
-        print("[INFO] Process stopped. Please try again later.")
-        input("\nPress Enter to exit ...")
-        sys.exit(1)
+        print("[INFO] Process stopped — PDF not available yet (e.g. holiday or not uploaded).")
+        # Exit 0 (not an error) so the GitHub Actions workflow doesn't show a false failure
+        # on days when the court hasn't published a list yet.
+        sys.exit(0)
 
     # 4. Extract and parse PDF text
     print()
@@ -491,7 +499,6 @@ def main():
     if not text.strip():
         print("[ERROR] No text could be extracted from the PDF.")
         print("        The file may be a scanned image and not machine-readable.")
-        input("\nPress Enter to exit ...")
         sys.exit(1)
 
     records = build_records(text)
@@ -506,7 +513,6 @@ def main():
 
     print()
     print("[OK]   All tasks completed successfully.")
-    input("\nPress Enter to exit ...")
 
 
 if __name__ == "__main__":
