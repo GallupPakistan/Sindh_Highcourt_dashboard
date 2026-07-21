@@ -648,8 +648,8 @@ def horizontal_bar_ranked(
             hovertemplate="<b>%{y}</b><br>Cases: %{x:,}<extra></extra>",
         )
     )
-    fig.update_layout(**base_layout(height=height, margin=dict(l=10, r=right_margin, t=10, b=40), bargap=0.3, showlegend=False))
-    fig.update_xaxes(**axis_x(), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])), range=[0, max_val * x_headroom])
+    fig.update_layout(**base_layout(height=height, margin=dict(l=10, r=right_margin, t=10, b=40), bargap=0.3, showlegend=False, uniformtext_minsize=7, uniformtext_mode="hide",))
+    fig.update_xaxes(**axis_x(), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])), range=[0, max_val * x_headroom], nticks=6)
     fig.update_yaxes(**axis_y(tickfont=dict(size=10, color=COLORS["text_dark"])), automargin=True)
     return fig
 
