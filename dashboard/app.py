@@ -399,6 +399,99 @@ def inject_css() -> None:
 # ═══════════════════════════════════════════════════════════════
 # DATA LOADING
 # ═══════════════════════════════════════════════════════════════
+import re as _re
+
+# ── Cleaning constants ───────────────────────────────────────────
+
+# Advocate: overflow pattern — a case reference token that signals
+# the start of bundled companion-case data.
+# Matches patterns like "Cr.Bail 1457/2023", "Cr.Misc. Appln 1148/2025",
+# "Const. P. 3612/2024" embedded inside an advocate cell, whether they
+# appear mid-string (after a space) or at the very start of the value.
+_ADVOCATE_OVERFLOW = _re.compile(
+    r"(?:(?<=\s)|^)"
+    r"(?:Cr\.\w[\w\.]*\s*(?:Appln|Appeal|Rev|Bail|Acq|Tran|Acctt[^,]*)?\s+|"
+    r"Const\.\s*P\.\s+|Spl\.\w+\s+)"
+    r"[\w\-\.]+/\d{4}",
+    _re.IGNORECASE,
+)
+
+# Case_Category: normalise typos and near-duplicate labels.
+_CAT_MAP: dict[str, str] = {
+    "AGAINST THE ORDER":              "AGAINST ORDER",
+    "AGAINST THE JUDGEMENT":          "AGAINST JUDGEMENT",
+    "SALES TAX.":                     "SALES TAX",
+    "QUASHEMENT OF F.I.R.":           "QUASHMENT OF F.I.R.",
+    "QUASHMENT OF F.I.R / FREE-WILL": "QUASHMENT OF F.I.R.",
+    "Land Matters":                   "LAND MATTERS",
+    "W.W.F":                          "WWF",
+}
+
+# Case_No prefix pattern that identifies criminal-matter cases
+# (used to fill empty Case_Category rows).
+_CRIMINAL_CASE_PREFIX = _re.compile(r"^(Cr\.|Spl\.Cr\.|Criminal)", _re.IGNORECASE)
+
+
+_VALID_SECTIONS = {
+    "FOR ANNOUNCEMENT OF JUDGMENT/ORDER",
+    "FOR APPLICATION IN DISPOSED OF CASES",
+    "FOR BAIL AFTER ARREST APPLICATIONS AND APPLICATIONS UNDER SECTION 426 CR.P.C",
+    "FOR BAIL BEFORE ARREST APPLICATIONS",
+    "FOR DIRECTIONS",
+    "FOR FRESH CASES",
+    "FOR HEARING OF CASES",
+    "FOR HEARING OF CASES(PRIORITY)",
+    "FOR ORDERS AS TO NON-PROSECUTION",
+}
+
+def _clean_section(df: pd.DataFrame) -> pd.DataFrame:
+    df["Section"] = df["Section"].apply(
+        lambda s: s if s.upper() in _VALID_SECTIONS else ""
+    )
+
+    print("=== SECTION DEBUG ===")
+    print(df["Section"].value_counts(dropna=False).head(20))
+    candidates = df["Section"].replace("", pd.NA).dropna().str.upper().str.strip()
+    near_misses = set(df["Section"].str.upper().str.strip().unique()) - _VALID_SECTIONS - {""}
+    print("NOT IN WHITELIST:", near_misses)
+
+    df["Section"] = df["Section"].replace("", pd.NA)
+    df["Section"] = (
+        df.groupby("Bench", sort=False)["Section"]
+        .transform(lambda s: s.ffill().bfill())
+    )
+    df["Section"] = df["Section"].fillna("UNKNOWN").astype(str)
+    return df
+
+
+def _clean_advocate(val: str) -> str:
+    """Strip companion-case overflow text from an advocate cell.
+    Overflow always follows a whitespace boundary (the regex requires it),
+    so after stripping we check if anything useful remains before the match.
+    """
+    val = val.strip()
+    if not val:
+        return val
+    m = _ADVOCATE_OVERFLOW.search(val)
+    if not m:
+        return val
+    cleaned = val[: m.start()].strip(" ,;-")
+    return cleaned if cleaned else ""
+
+
+def _clean_case_category(row: pd.Series) -> str:
+    """Return a normalised Case_Category:
+    • Apply the explicit deduplication map.
+    • For still-empty cells, infer from the Case_No prefix.
+    """
+    cat = _CAT_MAP.get(row["Case_Category"], row["Case_Category"]).strip()
+    if cat:
+        return cat
+    if _CRIMINAL_CASE_PREFIX.match(row["Case_No"].strip()):
+        return "CRIMINAL MATTER"
+    return "UNCATEGORIZED"
+
+
 def folder_signature(folder: Path) -> tuple:
     """Fingerprint of the folder's contents (name, size, mtime) so that
     st.cache_data invalidates automatically whenever a file changes,
@@ -433,7 +526,23 @@ def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
 
     df = pd.concat(frames, ignore_index=True)
     df.fillna("", inplace=True)
+    # in load_data, right after df.fillna("", inplace=True)
+    garbage_mask = df["Section"].str.contains(r"(?i)^for\s+", regex=True)
+    print(df.loc[garbage_mask, "Section"].value_counts().head(20))
+    print("---RAW UNIQUE SECTIONS---")
+    print(df["Section"].unique()[:40])
     df.drop_duplicates(inplace=True)
+
+    # ── Data cleaning ────────────────────────────────────────────
+    # 1. Section: remove garbage strings, forward/back-fill within bench
+    df = _clean_section(df)
+
+    # 2. Advocate overflow: strip embedded companion-case text
+    df["Respondent_Advocate"] = df["Respondent_Advocate"].apply(_clean_advocate)
+
+    # 3. Case_Category: normalise typos + infer from Case_No where blank
+    df["Case_Category"] = df.apply(_clean_case_category, axis=1)
+    # ── End cleaning ─────────────────────────────────────────────
 
     df["Date"] = df.apply(_parse_date, axis=1)
     df["Date_Str"] = df["Date"].apply(lambda d: d.strftime("%d %B %Y") if pd.notnull(d) else "")
