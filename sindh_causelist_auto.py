@@ -30,7 +30,7 @@ import fitz  # PyMuPDF
 # -------------------------------------------------------
 # CONFIGURATION
 # -------------------------------------------------------
-BASE_URL    = "https://sindhhighcourt.gov.pk/causelist.php"
+BASE_URL    = "https://sindhhighcourt.gov.pk/causelist/causelist_files/"
 PDF_PREFIX  = "1AD"          # Section prefix — update if a different section is needed
 OUTPUT_NAME = f"Sindh_Cause_List_{datetime.today().strftime('%d %B %Y')}.xlsx"
 # -------------------------------------------------------
