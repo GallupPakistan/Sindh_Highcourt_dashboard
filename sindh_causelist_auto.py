@@ -56,7 +56,7 @@ def build_pdf_url(date: datetime) -> tuple[str, str]:
     Constructs the PDF filename and download URL based on the given date.
     Example: 13 July 2026 -> 1AD13JUL26.pdf
     """
-    day      = date.strftime("%d").lstrip("0")  # e.g. 13
+    day      = date.strftime("%d")  # e.g. 13
     month    = date.strftime("%b").upper()       # e.g. JUL
     year     = date.strftime("%y")               # e.g. 26
     filename = f"{PDF_PREFIX}{day}{month}{year}.pdf"
