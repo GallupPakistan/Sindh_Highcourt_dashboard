@@ -1,5 +1,5 @@
-streamlit
+altair
 pandas
+streamlit==1.60.0
 plotly
-openpyxl
-numpy
+starlette<1.4.0
