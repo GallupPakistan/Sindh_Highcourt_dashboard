@@ -53,8 +53,23 @@ DONUT_PALETTE = [
 FONT = dict(family="Inter", color=COLORS["text_dark"], size=11)
 GRID_STYLE = dict(gridcolor="#EAF7F0", linecolor="#D5EDDF")
 
-CAUSE_LIST_FOLDER = Path(__file__).parent.parent / "cause_lists"
+def find_cause_list_folder(start: Path) -> Path:
+    """Search upward from the script's location for a 'cause_lists' folder.
+    This makes the app resilient to differences in folder depth between
+    local development and the deployed environment (Streamlit Cloud)."""
+    current = start.resolve()
+    for _ in range(6):  # search up to 6 levels up
+        candidate = current / "cause_lists"
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+        if current.parent == current:  # reached filesystem root
+            break
+        current = current.parent
+    # Fallback to the original assumption if nothing was found
+    return start.parent.parent / "cause_lists"
 
+
+CAUSE_LIST_FOLDER = find_cause_list_folder(Path(__file__).parent)
 
 # ═══════════════════════════════════════════════════════════════
 # ICONS
