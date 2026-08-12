@@ -53,12 +53,12 @@ DONUT_PALETTE = [
 FONT = dict(family="Inter", color=COLORS["text_dark"], size=11)
 GRID_STYLE = dict(gridcolor="#EAF7F0", linecolor="#D5EDDF")
 
-CAUSE_LIST_FOLDER = Path(__file__).parent/ "cause_lists"
+CAUSE_LIST_FOLDER = Path(__file__).parent.parent/ "cause_lists"
 
 # New multi-bench master data (Karachi, Hyderabad, Sukkur, Larkana, Mirpurkhas
 # combined into one file with a City column).
 MASTER_DATA_FOLDER = Path(r"C:\Users\Hafiz Ahmed\Desktop\Sindh\Sindh\sindh_causelist_master")
-MASTER_DATA_FILE = MASTER_DATA_FOLDER / "Sindh_Cause_List_Master_Combined.xlsx"
+MASTER_DATA_FOLDER = Path(__file__).parent.parent / "sindh_causelist_master"
 
 
 # ═══════════════════════════════════════════════════════════════
