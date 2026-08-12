@@ -778,6 +778,16 @@ def render_sidebar() -> pd.DataFrame:
         if st.button("🔄  Refresh Data", use_container_width=True):
             load_data.clear()
             st.rerun()
+            st.write("DEBUG — script location:", Path(__file__).resolve())
+st.write("DEBUG — cause_lists folder path:", CAUSE_LIST_FOLDER.resolve())
+st.write("DEBUG — folder exists?:", CAUSE_LIST_FOLDER.exists())
+if CAUSE_LIST_FOLDER.exists():
+    all_files = list(CAUSE_LIST_FOLDER.iterdir())
+    st.write("DEBUG — all files in folder:", all_files)
+    matched = list(CAUSE_LIST_FOLDER.glob("Sindh_Cause_List_*.xlsx"))
+    st.write("DEBUG — files matching pattern 'Sindh_Cause_List_*.xlsx':", matched)
+
+df_all = load_data(CAUSE_LIST_FOLDER, folder_signature(CAUSE_LIST_FOLDER))
 
         df_all = load_data(CAUSE_LIST_FOLDER, folder_signature(CAUSE_LIST_FOLDER))
         if df_all.empty:
