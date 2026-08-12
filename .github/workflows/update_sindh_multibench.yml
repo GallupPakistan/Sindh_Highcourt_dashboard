@@ -1,0 +1,55 @@
+name: Update Sindh Cause List (Multi-Bench)
+
+on:
+  schedule:
+    # Weekdays, 3x/day PKT (UTC+5) at non-top-of-hour minutes
+    # 09:07 PKT = 04:07 UTC, 12:07 PKT = 07:07 UTC, 15:07 PKT = 10:07 UTC
+    - cron: "7 4 * * 1-5"
+    - cron: "7 7 * * 1-5"
+    - cron: "7 10 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  update-cause-list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install openpyxl PyMuPDF requests --break-system-packages
+
+      - name: Run multi-bench cause list scraper (past 3 days)
+        run: |
+          START="$(date -d '2 days ago' +'%d-%m-%Y')"
+          END="$(date +'%d-%m-%Y')"
+          python sindh_causelist_multibench.py "$START" "$END" sindh_causelist_master
+
+      - name: Commit and push if there is new data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sindh_causelist_master/
+          if git diff --cached --quiet; then
+            echo "No new data to commit."
+          else
+            git commit -m "Auto-update: Sindh multi-bench cause list $(date +'%d %b %Y %H:%M') PKT"
+            git push
+          fi
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Sindh Multi-Bench Cause List workflow failed — ${new Date().toISOString().slice(0,10)}`,
+              body: `The scheduled run of \`sindh_causelist_multibench.py\` failed. Check the workflow logs: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            })

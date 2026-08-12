@@ -4,6 +4,7 @@ A Streamlit application for exploring daily cause-list data:
 case volumes, judge workloads, court sections, advocates, and case search.
 """
 
+import math
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -11,6 +12,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from datetime import datetime
 from pathlib import Path
+
+APP_BUILD = "2026-07-22-axis-fix-v2"
 
 st.set_page_config(
     page_title="Sindh High Court — Cause List Analytics",
@@ -51,6 +54,11 @@ FONT = dict(family="Inter", color=COLORS["text_dark"], size=11)
 GRID_STYLE = dict(gridcolor="#EAF7F0", linecolor="#D5EDDF")
 
 CAUSE_LIST_FOLDER = Path(__file__).parent.parent / "cause_lists"
+
+# New multi-bench master data (Karachi, Hyderabad, Sukkur, Larkana, Mirpurkhas
+# combined into one file with a City column).
+MASTER_DATA_FOLDER = Path(r"C:\Users\Hafiz Ahmed\Desktop\Sindh\Sindh\sindh_causelist_master")
+MASTER_DATA_FILE = MASTER_DATA_FOLDER / "Sindh_Cause_List_Master_Combined.xlsx"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -399,12 +407,114 @@ def inject_css() -> None:
 # ═══════════════════════════════════════════════════════════════
 # DATA LOADING
 # ═══════════════════════════════════════════════════════════════
+import re as _re
+
+# ── Cleaning constants ───────────────────────────────────────────
+
+# Advocate: overflow pattern — a case reference token that signals
+# the start of bundled companion-case data.
+# Matches patterns like "Cr.Bail 1457/2023", "Cr.Misc. Appln 1148/2025",
+# "Const. P. 3612/2024" embedded inside an advocate cell, whether they
+# appear mid-string (after a space) or at the very start of the value.
+_ADVOCATE_OVERFLOW = _re.compile(
+    r"(?:(?<=\s)|^)"
+    r"(?:Cr\.\w[\w\.]*\s*(?:Appln|Appeal|Rev|Bail|Acq|Tran|Acctt[^,]*)?\s+|"
+    r"Const\.\s*P\.\s+|Spl\.\w+\s+)"
+    r"[\w\-\.]+/\d{4}",
+    _re.IGNORECASE,
+)
+
+# Case_Category: normalise typos and near-duplicate labels.
+_CAT_MAP: dict[str, str] = {
+    "AGAINST THE ORDER":              "AGAINST ORDER",
+    "AGAINST THE JUDGEMENT":          "AGAINST JUDGEMENT",
+    "SALES TAX.":                     "SALES TAX",
+    "QUASHEMENT OF F.I.R.":           "QUASHMENT OF F.I.R.",
+    "QUASHMENT OF F.I.R / FREE-WILL": "QUASHMENT OF F.I.R.",
+    "Land Matters":                   "LAND MATTERS",
+    "W.W.F":                          "WWF",
+}
+
+# Case_No prefix pattern that identifies criminal-matter cases
+# (used to fill empty Case_Category rows).
+_CRIMINAL_CASE_PREFIX = _re.compile(r"^(Cr\.|Spl\.Cr\.|Criminal)", _re.IGNORECASE)
+
+
+_VALID_SECTIONS = {
+    "FOR ANNOUNCEMENT OF JUDGMENT/ORDER",
+    "FOR APPLICATION IN DISPOSED OF CASES",
+    "FOR BAIL AFTER ARREST APPLICATIONS AND APPLICATIONS UNDER SECTION 426 CR.P.C",
+    "FOR BAIL BEFORE ARREST APPLICATIONS",
+    "FOR DIRECTIONS",
+    "FOR FRESH CASES",
+    "FOR HEARING OF CASES",
+    "FOR HEARING OF CASES(PRIORITY)",
+    "FOR ORDERS AS TO NON-PROSECUTION",
+}
+
+def _clean_section(df: pd.DataFrame) -> pd.DataFrame:
+    df["Section"] = df["Section"].apply(
+        lambda s: s if s.upper() in _VALID_SECTIONS else ""
+    )
+
+    print("=== SECTION DEBUG ===")
+    print(df["Section"].value_counts(dropna=False).head(20))
+    candidates = df["Section"].replace("", pd.NA).dropna().str.upper().str.strip()
+    near_misses = set(df["Section"].str.upper().str.strip().unique()) - _VALID_SECTIONS - {""}
+    print("NOT IN WHITELIST:", near_misses)
+
+    df["Section"] = df["Section"].replace("", pd.NA)
+    df["Section"] = (
+        df.groupby("Bench", sort=False)["Section"]
+        .transform(lambda s: s.ffill().bfill())
+    )
+    df["Section"] = df["Section"].fillna("UNKNOWN").astype(str)
+    return df
+
+
+def _clean_advocate(val: str) -> str:
+    """Strip companion-case overflow text from an advocate cell.
+    Overflow always follows a whitespace boundary (the regex requires it),
+    so after stripping we check if anything useful remains before the match.
+    """
+    val = val.strip()
+    if not val:
+        return val
+    m = _ADVOCATE_OVERFLOW.search(val)
+    if not m:
+        return val
+    cleaned = val[: m.start()].strip(" ,;-")
+    return cleaned if cleaned else ""
+
+
+def _clean_case_category(row: pd.Series) -> str:
+    """Return a normalised Case_Category:
+    • Apply the explicit deduplication map.
+    • For still-empty cells, infer from the Case_No prefix.
+    """
+    cat = _CAT_MAP.get(row["Case_Category"], row["Case_Category"]).strip()
+    if cat:
+        return cat
+    if _CRIMINAL_CASE_PREFIX.match(row["Case_No"].strip()):
+        return "CRIMINAL MATTER"
+    return "UNCATEGORIZED"
+
+
 def folder_signature(folder: Path) -> tuple:
     """Fingerprint of the folder's contents (name, size, mtime) so that
     st.cache_data invalidates automatically whenever a file changes,
     without waiting for the TTL to expire."""
     files = sorted(folder.glob("Sindh_Cause_List_*.xlsx"))
     return tuple((f.name, f.stat().st_size, f.stat().st_mtime) for f in files)
+
+
+def master_file_signature(file_path: Path) -> tuple:
+    """Fingerprint of the single master combined file (name, size, mtime)
+    so that st.cache_data invalidates automatically whenever it changes."""
+    if not file_path.exists():
+        return ()
+    stat = file_path.stat()
+    return ((file_path.name, stat.st_size, stat.st_mtime),)
 
 
 def _parse_date(row: pd.Series):
@@ -418,7 +528,13 @@ def _parse_date(row: pd.Series):
 
 @st.cache_data(ttl=300)
 def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
-    files = sorted(folder.glob("Sindh_Cause_List_*.xlsx"))
+    # Prefer the new multi-bench master file (has a City column covering
+    # Karachi, Hyderabad, Sukkur, Larkana, Mirpurkhas). Fall back to any
+    # other "Sindh_Cause_List_*.xlsx" files sitting in the same folder.
+    if MASTER_DATA_FILE.exists():
+        files = [MASTER_DATA_FILE]
+    else:
+        files = sorted(MASTER_DATA_FOLDER.glob("Sindh_Cause_List_*.xlsx"))
     if not files:
         return pd.DataFrame()
 
@@ -433,7 +549,26 @@ def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
 
     df = pd.concat(frames, ignore_index=True)
     df.fillna("", inplace=True)
+    if "City" not in df.columns:
+        df["City"] = "Karachi"
+    df["City"] = df["City"].astype(str).str.strip()
+    # in load_data, right after df.fillna("", inplace=True)
+    garbage_mask = df["Section"].str.contains(r"(?i)^for\s+", regex=True)
+    print(df.loc[garbage_mask, "Section"].value_counts().head(20))
+    print("---RAW UNIQUE SECTIONS---")
+    print(df["Section"].unique()[:40])
     df.drop_duplicates(inplace=True)
+
+    # ── Data cleaning ────────────────────────────────────────────
+    # 1. Section: remove garbage strings, forward/back-fill within bench
+    df = _clean_section(df)
+
+    # 2. Advocate overflow: strip embedded companion-case text
+    df["Respondent_Advocate"] = df["Respondent_Advocate"].apply(_clean_advocate)
+
+    # 3. Case_Category: normalise typos + infer from Case_No where blank
+    df["Case_Category"] = df.apply(_clean_case_category, axis=1)
+    # ── End cleaning ─────────────────────────────────────────────
 
     df["Date"] = df.apply(_parse_date, axis=1)
     df["Date_Str"] = df["Date"].apply(lambda d: d.strftime("%d %B %Y") if pd.notnull(d) else "")
@@ -498,6 +633,21 @@ def navy_to_steel_gradient(n: int) -> list:
     return colors
 
 
+def nice_dtick(max_val: float, target_ticks: int = 5) -> float:
+    """Return a 'round' tick spacing (1/2/2.5/5 x a power of 10) so that a numeric
+    axis gets ~target_ticks evenly, cleanly spaced labels instead of letting
+    Plotly's auto tick-picker choose uneven values that render squeezed together."""
+    if max_val <= 0:
+        return 1
+    raw_step = max_val / target_ticks
+    magnitude = 10 ** math.floor(math.log10(raw_step))
+    for m in (1, 2, 2.5, 5, 10):
+        step = m * magnitude
+        if raw_step <= step:
+            return step
+    return 10 * magnitude
+
+
 def horizontal_bar_ranked(
     df_counts: pd.DataFrame,
     label_col: str,
@@ -539,8 +689,10 @@ def horizontal_bar_ranked(
             hovertemplate="<b>%{y}</b><br>Cases: %{x:,}<extra></extra>",
         )
     )
-    fig.update_layout(**base_layout(height=height, margin=dict(l=10, r=right_margin, t=10, b=40), bargap=0.3, showlegend=False))
-    fig.update_xaxes(**axis_x(), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])), range=[0, max_val * x_headroom])
+    fig.update_layout(**base_layout(height=height, margin=dict(l=10, r=right_margin, t=10, b=40), bargap=0.3, showlegend=False, uniformtext_minsize=7, uniformtext_mode="hide",))
+    axis_max = max_val * x_headroom
+    fig.update_xaxes(**axis_x(), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])),
+                      range=[0, axis_max], tick0=0, dtick=nice_dtick(max_val, target_ticks=4), automargin=True)
     fig.update_yaxes(**axis_y(tickfont=dict(size=10, color=COLORS["text_dark"])), automargin=True)
     return fig
 
@@ -628,29 +780,36 @@ def render_sidebar() -> pd.DataFrame:
             """,
             unsafe_allow_html=True,
         )
+        st.caption(f"Build: {APP_BUILD}")
 
         st.markdown('<div class="sb-section" style="padding-top:0.9rem;">Data</div>', unsafe_allow_html=True)
         if st.button("🔄  Refresh Data", use_container_width=True):
             load_data.clear()
             st.rerun()
 
-        df_all = load_data(CAUSE_LIST_FOLDER, folder_signature(CAUSE_LIST_FOLDER))
+        df_all = load_data(MASTER_DATA_FOLDER, master_file_signature(MASTER_DATA_FILE))
         if df_all.empty:
-            st.error("No data found in cause_lists folder.")
+            st.error("No data found. Check the master file path/name.")
             st.stop()
 
         st.markdown('<div class="sb-section">Filters</div>', unsafe_allow_html=True)
 
-        avail_dates = sorted(df_all["Date_Str"].unique(), reverse=True)
+        # ── COURT LOCATION (City) — drives every other filter below ────
+        all_cities = sorted(c for c in df_all["City"].unique() if c)
+        sel_cities = st.multiselect("COURT LOCATION", all_cities, default=[], placeholder="All Locations")
+        df_city = df_all if not sel_cities else df_all[df_all["City"].isin(sel_cities)]
+        sel_city = "All Locations" if not sel_cities else (sel_cities[0] if len(sel_cities) == 1 else ", ".join(sel_cities))
+
+        avail_dates = sorted(df_city["Date_Str"].unique(), reverse=True)
         sel_dates = st.multiselect("HEARING DATE", avail_dates, default=[], placeholder="All Dates")
 
-        all_judges = sorted(df_all["Judge_Short"].unique())
+        all_judges = sorted(df_city["Judge_Short"].unique())
         sel_judges = st.multiselect("JUDGE / BENCH", all_judges, default=[], placeholder="All Judges")
 
-        all_sections = sorted(df_all["Section_Clean"].unique())
+        all_sections = sorted(df_city["Section_Clean"].unique())
         sel_sections = st.multiselect("CAUSE LIST TYPE", all_sections, default=[], placeholder="All Types")
 
-        all_cats = sorted(df_all["Case_Category"].replace("", "Uncategorized").unique())
+        all_cats = sorted(df_city["Case_Category"].replace("", "Uncategorized").unique())
         sel_cats = st.multiselect("CASE CATEGORY", all_cats, default=[], placeholder="All Categories")
 
         st.markdown("<hr style='border-color:#D5EDDF;margin:1rem 0;'>", unsafe_allow_html=True)
@@ -658,16 +817,17 @@ def render_sidebar() -> pd.DataFrame:
             f"""
             <div class="sb-section">Data Info</div>
             <div style="font-size:0.78rem;color:#3F6656;line-height:1.9;">
+                📍 <b>{sel_city}</b><br>
                 📁 <b>{len(avail_dates)}</b> day(s) loaded<br>
-                ⚖️ <b>{df_all['Case_No'].nunique():,}</b> unique cases<br>
-                👨‍⚖️ <b>{df_all['Judge_Short'].nunique()}</b> judges<br>
+                ⚖️ <b>{df_city['Case_No'].nunique():,}</b> unique cases<br>
+                👨‍⚖️ <b>{df_city['Judge_Short'].nunique()}</b> judges<br>
                 📅 Latest: <b>{avail_dates[0] if avail_dates else '—'}</b>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    filtered = df_all.copy()
+    filtered = df_city.copy()
     if sel_dates:
         filtered = filtered[filtered["Date_Str"].isin(sel_dates)]
     if sel_judges:
@@ -679,6 +839,7 @@ def render_sidebar() -> pd.DataFrame:
         filtered = filtered[cat_f.isin(sel_cats)]
 
     st.session_state["_avail_dates"] = avail_dates
+    st.session_state["_sel_city"] = sel_city
     return filtered
 
 
@@ -688,6 +849,13 @@ def render_sidebar() -> pd.DataFrame:
 def render_banner(df: pd.DataFrame) -> None:
     avail_dates = st.session_state.get("_avail_dates", [])
     last_updated = avail_dates[0] if avail_dates else "—"
+    sel_city = st.session_state.get("_sel_city", "All Locations")
+    if sel_city == "All Locations":
+        scope_label = "All Benches — Karachi, Hyderabad, Sukkur, Larkana & Mirpurkhas"
+    elif "," in sel_city:
+        scope_label = f"{sel_city} Benches"
+    else:
+        scope_label = f"{sel_city} Bench"
 
     st.markdown(
         f"""
@@ -696,7 +864,7 @@ def render_banner(df: pd.DataFrame) -> None:
                 <div class="banner-emblem">⚖️</div>
                 <div>
                     <div class="banner-title">Sindh High Court<br>Analytics Dashboard</div>
-                    <div class="banner-subtitle">Judicial Intelligence Platform — Sindh High Court | Section 1AD</div>
+                    <div class="banner-subtitle">Judicial Intelligence Platform — {scope_label}</div>
                 </div>
             </div>
             <div class="banner-right">
@@ -754,20 +922,26 @@ def tab_overview(df: pd.DataFrame) -> None:
     st.markdown('<div class="sec-title">📈 Case Volume Over Time</div>', unsafe_allow_html=True)
     daily = df.groupby("Date").size().reset_index(name="Cases").sort_values("Date")
     daily["MA3"] = daily["Cases"].rolling(3, min_periods=1).mean().round(0)
+    # Use a categorical (string) axis for the dates instead of a continuous date
+    # axis — with only a handful of days loaded, Plotly's automatic date-tick
+    # generator was producing duplicate/overlapping labels (each date rendered
+    # twice, see reported bug). A category axis guarantees exactly one tick
+    # per date, eliminating the overlap.
+    daily["Date_Label"] = daily["Date"].dt.strftime("%d %b")
 
     fig_trend = go.Figure()
     fig_trend.add_trace(
         go.Bar(
-            x=daily["Date"], y=daily["Cases"], name="Daily Cases",
+            x=daily["Date_Label"], y=daily["Cases"], name="Daily Cases",
             marker_color=COLORS["navy"], marker_line_width=0, opacity=0.8,
-            hovertemplate="<b>%{x|%d %b %Y}</b><br>Cases: %{y:,}<extra></extra>",
+            hovertemplate="<b>%{x}</b><br>Cases: %{y:,}<extra></extra>",
         )
     )
     fig_trend.add_trace(
         go.Scatter(
-            x=daily["Date"], y=daily["MA3"], name="3-Day Avg",
+            x=daily["Date_Label"], y=daily["MA3"], name="3-Day Avg",
             line=dict(color=COLORS["gold"], width=2.5), mode="lines",
-            hovertemplate="<b>%{x|%d %b %Y}</b><br>3-Day Avg: %{y:,.0f}<extra></extra>",
+            hovertemplate="<b>%{x}</b><br>3-Day Avg: %{y:,.0f}<extra></extra>",
         )
     )
     fig_trend.update_layout(
@@ -776,9 +950,12 @@ def tab_overview(df: pd.DataFrame) -> None:
             legend=dict(orientation="h", x=0, y=1.12, font=dict(size=11), bgcolor="rgba(0,0,0,0)", bordercolor="#D5EDDF", borderwidth=1),
         )
     )
-    fig_trend.update_xaxes(**axis_x(-30, tickfont=dict(size=11, color=COLORS["text_mid"]), tickformat="%d %b"))
+    fig_trend.update_xaxes(
+        **axis_x(-30 if len(daily) > 10 else 0, tickfont=dict(size=11, color=COLORS["text_mid"])),
+        type="category", categoryorder="array", categoryarray=daily["Date_Label"],
+    )
     fig_trend.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"]), title=dict(text="Number of Cases", font=dict(size=11, color=COLORS["text_mid"]))))
-    st.plotly_chart(fig_trend, use_container_width=True)
+    st.plotly_chart(fig_trend, use_container_width=True, key="chart_899_fig_trend")
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
     col1, col2 = st.columns(2, gap="medium")
@@ -794,7 +971,7 @@ def tab_overview(df: pd.DataFrame) -> None:
             single_color=PALETTE[: len(cc)], value_labels=cc.sort_values("Cases")["Label"],
             right_margin=195, x_headroom=1.3,
         )
-        st.plotly_chart(fig_cat, use_container_width=True)
+        st.plotly_chart(fig_cat, use_container_width=True, key="chart_915_fig_cat")
 
     with col2:
         st.markdown('<div class="sec-title">📋 Cause List Distribution</div>', unsafe_allow_html=True)
@@ -802,7 +979,7 @@ def tab_overview(df: pd.DataFrame) -> None:
         sc = collapse_top_n(sc_full, "Section", "Cases", top_n=6)
         colors = [COLORS["dark_green"], COLORS["gold"], COLORS["teal"], COLORS["red"], COLORS["orange"], COLORS["purple"], COLORS["text_light"]]
         fig_sec = donut_chart(sc, "Section", "Cases", height=360, label_len=26, colors=colors)
-        st.plotly_chart(fig_sec, use_container_width=True)
+        st.plotly_chart(fig_sec, use_container_width=True, key="chart_923_fig_sec")
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
@@ -811,13 +988,13 @@ def tab_overview(df: pd.DataFrame) -> None:
         st.markdown('<div class="sec-title">👨‍⚖️ Top 10 Judges by Caseload</div>', unsafe_allow_html=True)
         jc = value_counts_df(df["Judge_Short"], "Judge").head(10)
         fig_jc = horizontal_bar_ranked(jc, "Judge", "Cases", height=380, label_len=28, single_color=COLORS["dark_green"], right_margin=80)
-        st.plotly_chart(fig_jc, use_container_width=True)
+        st.plotly_chart(fig_jc, use_container_width=True, key="chart_932_fig_jc")
 
     with col4:
         st.markdown('<div class="sec-title">🧑‍💼 Top 10 Petitioner Advocates</div>', unsafe_allow_html=True)
         pa = value_counts_df(df.loc[df["Petitioner_Advocate"] != "", "Petitioner_Advocate"], "Advocate").head(10)
         fig_pa = horizontal_bar_ranked(pa, "Advocate", "Cases", height=380, label_len=28, single_color=COLORS["teal"], right_margin=80)
-        st.plotly_chart(fig_pa, use_container_width=True)
+        st.plotly_chart(fig_pa, use_container_width=True, key="chart_938_fig_pa")
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
@@ -833,7 +1010,7 @@ def tab_overview(df: pd.DataFrame) -> None:
         fig_dow.update_layout(**base_layout(height=320, margin=dict(l=50, r=30, t=20, b=60), bargap=0.35))
         fig_dow.update_xaxes(**axis_x(0, tickfont=dict(size=11, color=COLORS["text_mid"])))
         fig_dow.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"]), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"]))))
-        st.plotly_chart(fig_dow, use_container_width=True)
+        st.plotly_chart(fig_dow, use_container_width=True, key="chart_954_fig_dow")
 
     with col6:
         st.markdown('<div class="sec-title">🗓️ Cases by Month</div>', unsafe_allow_html=True)
@@ -846,7 +1023,67 @@ def tab_overview(df: pd.DataFrame) -> None:
         fig_mon.update_layout(**base_layout(height=320, margin=dict(l=50, r=30, t=20, b=60), bargap=0.35))
         fig_mon.update_xaxes(**axis_x(-30, tickfont=dict(size=11, color=COLORS["text_mid"])))
         fig_mon.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"]), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"]))))
-        st.plotly_chart(fig_mon, use_container_width=True)
+        st.plotly_chart(fig_mon, use_container_width=True, key="chart_967_fig_mon")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col7, col8 = st.columns(2, gap="medium")
+    with col7:
+        st.markdown('<div class="sec-title">📊 Cumulative Case Growth</div>', unsafe_allow_html=True)
+        cum = daily.copy()
+        cum["Cumulative"] = cum["Cases"].cumsum()
+        fig_cum = go.Figure(go.Scatter(
+            x=cum["Date_Label"], y=cum["Cumulative"], mode="lines+markers", fill="tozeroy",
+            line=dict(color=COLORS["dark_green"], width=2.5), marker=dict(size=6, color=COLORS["dark_green"]),
+            fillcolor="rgba(31,164,99,0.15)",
+            hovertemplate="<b>%{x}</b><br>Cumulative Cases: %{y:,}<extra></extra>",
+        ))
+        fig_cum.update_layout(**base_layout(height=320, margin=dict(l=50, r=30, t=20, b=50)))
+        fig_cum.update_xaxes(**axis_x(-30 if len(cum) > 10 else 0, tickfont=dict(size=11, color=COLORS["text_mid"])),
+                              type="category", categoryorder="array", categoryarray=cum["Date_Label"])
+        fig_cum.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"])), title=dict(text="Cumulative Cases", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_cum, use_container_width=True, key="chart_986_fig_cum")
+
+    with col8:
+        st.markdown('<div class="sec-title">🧑‍💼 Top 10 Respondent Advocates</div>', unsafe_allow_html=True)
+        ra = value_counts_df(df.loc[df["Respondent_Advocate"] != "", "Respondent_Advocate"], "Advocate").head(10)
+        fig_ra = horizontal_bar_ranked(ra, "Advocate", "Cases", height=320, label_len=28, single_color=COLORS["orange"], right_margin=80)
+        st.plotly_chart(fig_ra, use_container_width=True, key="chart_992_fig_ra")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-title">🗂️ Top Case Categories — Daily Trend</div>', unsafe_allow_html=True)
+    cat_trend_df = df.dropna(subset=["Date"]).copy()
+    if cat_trend_df.empty:
+        st.info("No dated records available for the current filter.")
+    else:
+        cat_trend_df["Case_Category"] = cat_trend_df["Case_Category"].replace("", "Uncategorized")
+        cat_trend_df["Date_Label"] = cat_trend_df["Date"].dt.strftime("%d %b")
+        top_cats_trend = cat_trend_df["Case_Category"].value_counts().head(5).index.tolist()
+        order_lbls = daily["Date_Label"].tolist()
+        ct_line = (
+            cat_trend_df[cat_trend_df["Case_Category"].isin(top_cats_trend)]
+            .groupby(["Date", "Date_Label", "Case_Category"]).size()
+            .reset_index(name="Cases").sort_values("Date")
+        )
+        line_colors2 = [COLORS["dark_green"], COLORS["gold"], COLORS["teal"], COLORS["red"], COLORS["purple"]]
+        fig_ct = go.Figure()
+        for i, cat in enumerate(top_cats_trend):
+            cdata = ct_line[ct_line["Case_Category"] == cat]
+            label = truncate(cat, 26)
+            fig_ct.add_trace(go.Scatter(
+                x=cdata["Date_Label"], y=cdata["Cases"], mode="lines+markers", name=label,
+                line=dict(width=2.5, color=line_colors2[i % len(line_colors2)]), marker=dict(size=6),
+                hovertemplate=f"<b>{label}</b><br>%{{x}}<br>Cases: %{{y}}<extra></extra>",
+            ))
+        fig_ct.update_layout(**base_layout(
+            height=340, margin=dict(l=50, r=20, t=40, b=50),
+            legend=dict(orientation="h", x=0.5, y=1.15, xanchor="center", yanchor="bottom", font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+        ))
+        fig_ct.update_xaxes(**axis_x(-30 if len(order_lbls) > 10 else 0, tickfont=dict(size=10, color=COLORS["text_mid"])),
+                             type="category", categoryorder="array", categoryarray=order_lbls)
+        fig_ct.update_yaxes(**axis_y(tickfont=dict(size=10, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_ct, use_container_width=True, key="chart_1027_fig_ct")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -899,7 +1136,7 @@ def tab_daily_cause_list(df: pd.DataFrame) -> None:
             jc_filt, "Judge", "Cases", height=380, label_len=34,
             gradient_desc=True, right_margin=60
         )
-        st.plotly_chart(fig_jf, use_container_width=True)
+        st.plotly_chart(fig_jf, use_container_width=True, key="chart_1080_fig_jf")
 
     with col_b:
         st.markdown('<div class="sec-title">📋 Cases per Section</div>', unsafe_allow_html=True)
@@ -907,7 +1144,94 @@ def tab_daily_cause_list(df: pd.DataFrame) -> None:
         sc_don = collapse_top_n(sc_don_full, "Section", "Cases", top_n=6, other_label="Other")
         colors = [COLORS["dark_green"], COLORS["gold"], COLORS["teal"], COLORS["green_acc"], COLORS["red"], COLORS["orange"], COLORS["text_light"]]
         fig_donut = donut_chart(sc_don, "Section", "Cases", height=380, label_len=28, colors=colors, hole=0.62)
-        st.plotly_chart(fig_donut, use_container_width=True)
+        st.plotly_chart(fig_donut, use_container_width=True, key="chart_1088_fig_donut")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col_c, col_d = st.columns(2, gap="medium")
+    with col_c:
+        st.markdown('<div class="sec-title">🗂️ Cases per Category</div>', unsafe_allow_html=True)
+        cc_filt = value_counts_df(filt["Case_Category"], "Category", blank_label="Uncategorized").head(10)
+        fig_ccf = horizontal_bar_ranked(cc_filt, "Category", "Cases", height=340, label_len=30, single_color=COLORS["teal"], right_margin=60)
+        st.plotly_chart(fig_ccf, use_container_width=True, key="chart_1097_fig_ccf")
+
+    with col_d:
+        st.markdown('<div class="sec-title">📅 Cases by Day of Week</div>', unsafe_allow_html=True)
+        dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        dow_f = filt["Date"].dt.day_name().value_counts().reindex(dow_order).dropna().reset_index()
+        dow_f.columns = ["Day", "Cases"]
+        fig_dowf = px.bar(dow_f, x="Day", y="Cases", color_discrete_sequence=[COLORS["navy"]], text="Cases")
+        fig_dowf.update_traces(marker_line_width=0, textposition="outside", textfont=dict(size=11, color=COLORS["text_dark"]),
+                                hovertemplate="<b>%{x}</b><br>Cases: %{y:,}<extra></extra>")
+        fig_dowf.update_layout(**base_layout(height=340, margin=dict(l=50, r=30, t=20, b=60), bargap=0.35))
+        fig_dowf.update_xaxes(**axis_x(0, tickfont=dict(size=11, color=COLORS["text_mid"])))
+        fig_dowf.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_dowf, use_container_width=True, key="chart_1110_fig_dowf")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col_e, col_f = st.columns(2, gap="medium")
+    with col_e:
+        st.markdown('<div class="sec-title">🧑‍💼 Top 10 Petitioner Advocates</div>', unsafe_allow_html=True)
+        pa_f = value_counts_df(filt.loc[filt["Petitioner_Advocate"] != "", "Petitioner_Advocate"], "Advocate").head(10)
+        fig_paf = horizontal_bar_ranked(pa_f, "Advocate", "Cases", height=340, label_len=28, single_color=COLORS["dark_green"], right_margin=60)
+        st.plotly_chart(fig_paf, use_container_width=True, key="chart_1119_fig_paf")
+
+    with col_f:
+        st.markdown('<div class="sec-title">🧑‍💼 Top 10 Respondent Advocates</div>', unsafe_allow_html=True)
+        ra_f = value_counts_df(filt.loc[filt["Respondent_Advocate"] != "", "Respondent_Advocate"], "Advocate").head(10)
+        fig_raf = horizontal_bar_ranked(ra_f, "Advocate", "Cases", height=340, label_len=28, single_color=COLORS["orange"], right_margin=60)
+        st.plotly_chart(fig_raf, use_container_width=True, key="chart_1125_fig_raf")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col_g, col_h = st.columns(2, gap="medium")
+    with col_g:
+        st.markdown('<div class="sec-title">📈 Cases Trend (Filtered)</div>', unsafe_allow_html=True)
+        daily_f = filt.dropna(subset=["Date"]).groupby("Date").size().reset_index(name="Cases").sort_values("Date")
+        if len(daily_f) < 2:
+            st.info("Select more than one date to see a trend line.")
+        else:
+            daily_f["Date_Label"] = daily_f["Date"].dt.strftime("%d %b")
+            fig_trendf = go.Figure(go.Bar(
+                x=daily_f["Date_Label"], y=daily_f["Cases"], marker_color=COLORS["dark_green"], marker_line_width=0,
+                hovertemplate="<b>%{x}</b><br>Cases: %{y:,}<extra></extra>",
+            ))
+            fig_trendf.update_layout(**base_layout(height=320, margin=dict(l=50, r=30, t=20, b=50), bargap=0.3))
+            fig_trendf.update_xaxes(**axis_x(-30 if len(daily_f) > 10 else 0, tickfont=dict(size=11, color=COLORS["text_mid"])),
+                                     type="category", categoryorder="array", categoryarray=daily_f["Date_Label"])
+            fig_trendf.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
+            st.plotly_chart(fig_trendf, use_container_width=True, key="chart_1145_fig_trendf")
+
+    with col_h:
+        st.markdown('<div class="sec-title">👨‍⚖️ Active Judges (Filtered)</div>', unsafe_allow_html=True)
+        jud_f = value_counts_df(filt["Judge_Short"], "Judge").head(8)
+        colors_j = [COLORS["dark_green"], COLORS["gold"], COLORS["teal"], COLORS["green_acc"], COLORS["red"], COLORS["orange"], COLORS["purple"], COLORS["text_light"]]
+        fig_jdon = donut_chart(jud_f, "Judge", "Cases", height=320, label_len=24, colors=colors_j, total_label="Cases", hole=0.6)
+        st.plotly_chart(fig_jdon, use_container_width=True, key="chart_1152_fig_jdon")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col_i, col_j = st.columns(2, gap="medium")
+    with col_i:
+        st.markdown('<div class="sec-title">🗓️ Cases by Month (Filtered)</div>', unsafe_allow_html=True)
+        month_order = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        mon_f = filt["Month"].value_counts().reindex(month_order).dropna().reset_index()
+        mon_f.columns = ["Month", "Cases"]
+        fig_monf = px.bar(mon_f, x="Month", y="Cases", color_discrete_sequence=[COLORS["gold"]], text="Cases")
+        fig_monf.update_traces(marker_line_width=0, textposition="outside", textfont=dict(size=11, color=COLORS["text_dark"]),
+                                hovertemplate="<b>%{x}</b><br>Cases: %{y:,}<extra></extra>")
+        fig_monf.update_layout(**base_layout(height=320, margin=dict(l=50, r=30, t=20, b=60), bargap=0.35))
+        fig_monf.update_xaxes(**axis_x(-30, tickfont=dict(size=11, color=COLORS["text_mid"])))
+        fig_monf.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_monf, use_container_width=True, key="chart_1168_fig_monf")
+
+    with col_j:
+        st.markdown('<div class="sec-title">🗂️ Cases per Category Share (Filtered)</div>', unsafe_allow_html=True)
+        cc_don_f = collapse_top_n(cc_filt.sort_values("Cases", ascending=False), "Category", "Cases", top_n=6, other_label="Other")
+        colors_ccd = [COLORS["navy"], COLORS["gold"], COLORS["teal"], COLORS["green_acc"], COLORS["red"], COLORS["orange"], COLORS["text_light"]]
+        fig_ccdon = donut_chart(cc_don_f, "Category", "Cases", height=320, label_len=24, colors=colors_ccd, total_label="Cases")
+        st.plotly_chart(fig_ccdon, use_container_width=True, key="chart_1175_fig_ccdon")
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
@@ -959,7 +1283,7 @@ def tab_judge_analysis(df: pd.DataFrame) -> None:
         st.markdown('<div class="sec-title">👨‍⚖️ Top 10 Judges by Caseload</div>', unsafe_allow_html=True)
         top10 = jrank.head(10)
         fig = horizontal_bar_ranked(top10, "Judge", "Cases", height=520, label_len=26, single_color=COLORS["dark_green"], right_margin=50)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="chart_1227_fig")
 
     with col2:
         st.markdown('<div class="sec-title">⚡ Workload Efficiency Bubble</div>', unsafe_allow_html=True)
@@ -980,7 +1304,7 @@ def tab_judge_analysis(df: pd.DataFrame) -> None:
             fig2.update_xaxes(**axis_x(tickfont=dict(size=10, color=COLORS["text_mid"])),
                               title=dict(text="Number of Sections Handled", font=dict(size=10, color=COLORS["text_mid"])), dtick=1)
             fig2.update_yaxes(**axis_y(), title=dict(text="Total Cases", font=dict(size=10, color=COLORS["text_mid"])))
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, use_container_width=True, key="chart_1248_fig2")
         else:
             st.info("Not enough judges in the current filter to plot a bubble chart.")
 
@@ -991,12 +1315,99 @@ def tab_judge_analysis(df: pd.DataFrame) -> None:
     chart_h_all = min(max(n_all * 22, 400), 1200)
     fig_all = horizontal_bar_ranked(jrank, "Judge", "Cases", height=chart_h_all, label_len=36, gradient_desc=True, right_margin=60)
     fig_all.update_layout(bargap=0.25)
-    st.plotly_chart(fig_all, use_container_width=True)
+    st.plotly_chart(fig_all, use_container_width=True, key="chart_1259_fig_all")
 
     with st.expander("📄 View as sortable table"):
         jrank_tbl = jrank.sort_values("Cases", ascending=False).reset_index(drop=True)
         jrank_tbl.index = jrank_tbl.index + 1
         st.dataframe(jrank_tbl, use_container_width=True, height=420)
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col_i, col_j = st.columns(2, gap="medium")
+    with col_i:
+        st.markdown('<div class="sec-title">📆 Avg. Cases / Day — Top 10 Judges</div>', unsafe_allow_html=True)
+        top10_rate = jrank.sort_values("Cases_Per_Day", ascending=False).head(10)
+        fig_rate = horizontal_bar_ranked(top10_rate, "Judge", "Cases_Per_Day", height=380, label_len=26, single_color=COLORS["gold"], right_margin=50)
+        fig_rate.update_xaxes(title=dict(text="Cases per Day", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_rate, use_container_width=True, key="chart_1274_fig_rate")
+
+    with col_j:
+        st.markdown('<div class="sec-title">📅 Days Active — Top 10 Judges</div>', unsafe_allow_html=True)
+        top10_days = jrank.sort_values("Dates", ascending=False).head(10)
+        fig_days = horizontal_bar_ranked(top10_days, "Judge", "Dates", height=380, label_len=26, single_color=COLORS["teal"], right_margin=50)
+        fig_days.update_xaxes(title=dict(text="Days Active", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_days, use_container_width=True, key="chart_1281_fig_days")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-title">📈 Caseload Trend — Top 5 Judges</div>', unsafe_allow_html=True)
+    jt_df = df.dropna(subset=["Date"]).copy()
+    if jt_df.empty:
+        st.info("No dated records available for the current filter.")
+    else:
+        jt_df["Date_Label"] = jt_df["Date"].dt.strftime("%d %b")
+        order_lbls_j = jt_df.drop_duplicates("Date").sort_values("Date")["Date_Label"].tolist()
+        top5_judges = jrank.head(5)["Judge"].tolist()
+        jt_line = (
+            jt_df[jt_df["Judge_Short"].isin(top5_judges)]
+            .groupby(["Date", "Date_Label", "Judge_Short"]).size()
+            .reset_index(name="Cases").sort_values("Date")
+        )
+        line_colors3 = [COLORS["dark_green"], COLORS["gold"], COLORS["teal"], COLORS["red"], COLORS["purple"]]
+        fig_jtrend = go.Figure()
+        for i, jname in enumerate(top5_judges):
+            jdata = jt_line[jt_line["Judge_Short"] == jname]
+            label = truncate(jname, 26)
+            fig_jtrend.add_trace(go.Scatter(
+                x=jdata["Date_Label"], y=jdata["Cases"], mode="lines+markers", name=label,
+                line=dict(width=2.5, color=line_colors3[i % len(line_colors3)]), marker=dict(size=6),
+                hovertemplate=f"<b>{label}</b><br>%{{x}}<br>Cases: %{{y}}<extra></extra>",
+            ))
+        fig_jtrend.update_layout(**base_layout(
+            height=340, margin=dict(l=50, r=20, t=40, b=50),
+            legend=dict(orientation="h", x=0.5, y=1.15, xanchor="center", yanchor="bottom", font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+        ))
+        fig_jtrend.update_xaxes(**axis_x(-30 if len(order_lbls_j) > 10 else 0, tickfont=dict(size=10, color=COLORS["text_mid"])),
+                                 type="category", categoryorder="array", categoryarray=order_lbls_j)
+        fig_jtrend.update_yaxes(**axis_y(tickfont=dict(size=10, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_jtrend, use_container_width=True, key="chart_1315_fig_jtrend")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-title">🧮 Top 10 Judges × Case Category</div>', unsafe_allow_html=True)
+    top_j10 = jrank.head(10)["Judge"].tolist()
+    jc_stack = df[df["Judge_Short"].isin(top_j10)].copy()
+    jc_stack["Case_Category"] = jc_stack["Case_Category"].replace("", "Uncategorized")
+    top_cats_stack = jc_stack["Case_Category"].value_counts().head(6).index.tolist()
+    jc_stack = jc_stack[jc_stack["Case_Category"].isin(top_cats_stack)]
+    jc_stack_g = jc_stack.groupby(["Judge_Short", "Case_Category"]).size().reset_index(name="Cases")
+    jc_stack_g["Judge_Disp"] = jc_stack_g["Judge_Short"].apply(lambda x: truncate(x, 22))
+    order_stack = jc_stack_g.groupby("Judge_Disp")["Cases"].sum().sort_values(ascending=False).index.tolist()
+    fig_jcstack = px.bar(
+        jc_stack_g, x="Judge_Disp", y="Cases", color="Case_Category", barmode="stack",
+        category_orders={"Judge_Disp": order_stack},
+        color_discrete_sequence=[COLORS["navy"], COLORS["gold"], COLORS["teal"], COLORS["green_acc"], COLORS["red"], COLORS["orange"]],
+    )
+    fig_jcstack.update_traces(marker_line_width=0)
+    fig_jcstack.update_layout(**base_layout(
+        height=420, margin=dict(l=50, r=10, t=40, b=110), bargap=0.25,
+        legend=dict(orientation="h", x=0.5, y=1.12, xanchor="center", yanchor="bottom", font=dict(size=10), bgcolor="rgba(0,0,0,0)", title=None),
+    ))
+    fig_jcstack.update_xaxes(**axis_x(-35, tickfont=dict(size=10, color=COLORS["text_dark"])),
+                              title=dict(text="Judge", font=dict(size=10, color=COLORS["text_mid"])), automargin=True)
+    fig_jcstack.update_yaxes(**axis_y(tickfont=dict(size=10, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
+    st.plotly_chart(fig_jcstack, use_container_width=True, key="chart_1341_fig_jcstack")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-title">📊 Judge Caseload Distribution</div>', unsafe_allow_html=True)
+    fig_jhist = px.histogram(jrank, x="Cases", nbins=20, color_discrete_sequence=[COLORS["dark_green"]])
+    fig_jhist.update_traces(marker_line_width=0, hovertemplate="Cases: %{x}<br>Judges: %{y}<extra></extra>")
+    fig_jhist.update_layout(**base_layout(height=300, margin=dict(l=50, r=20, t=20, b=50), bargap=0.1))
+    fig_jhist.update_xaxes(**axis_x(), title=dict(text="Cases Handled", font=dict(size=10, color=COLORS["text_mid"])))
+    fig_jhist.update_yaxes(**axis_y(), title=dict(text="Number of Judges", font=dict(size=10, color=COLORS["text_mid"])))
+    st.plotly_chart(fig_jhist, use_container_width=True, key="chart_1351_fig_jhist")
 
     st.markdown('<div class="sec-title">Individual Judge Deep Dive</div>', unsafe_allow_html=True)
     sel_jj = st.selectbox("Select Judge", sorted(df["Judge_Short"].unique()), key="jdd")
@@ -1024,14 +1435,14 @@ def tab_judge_analysis(df: pd.DataFrame) -> None:
         fig3.update_layout(annotations=[dict(
             text=f"<b>{sc2['Cases'].sum():,}</b><br><span style='font-size:9px;color:{COLORS['text_mid']}'>Cases</span>",
             x=0.5, y=0.5, font=dict(size=16, color=COLORS["text_dark"]), showarrow=False)])
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, use_container_width=True, key="chart_1379_fig3")
 
     with colB:
         st.markdown('<div class="sec-title">📊 By Category</div>', unsafe_allow_html=True)
         cc2 = value_counts_df(jdf["Case_Category"], "Category", blank_label="Uncategorized").head(10)
         fig4 = horizontal_bar_ranked(cc2, "Category", "Cases", height=340, label_len=22, single_color=COLORS["teal"], right_margin=40, x_headroom=1.2)
         fig4.update_layout(font=dict(family="Inter", color=COLORS["text_dark"], size=10))
-        st.plotly_chart(fig4, use_container_width=True)
+        st.plotly_chart(fig4, use_container_width=True, key="chart_1386_fig4")
 
     disp = ["Sr_No", "Case_No", "Case_Category", "Petitioner", "Respondent",
             "Petitioner_Advocate", "Respondent_Advocate", "Section_Clean", "Date_Str"]
@@ -1064,7 +1475,7 @@ def tab_court_infrastructure(df: pd.DataFrame) -> None:
             single_color=COLORS["dark_green"], value_labels=sec_c.sort_values("Cases")["Label"],
             right_margin=195, x_headroom=1.3,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="chart_1419_fig")
 
     with col2:
         st.markdown('<div class="sec-title">🥧 Section Share</div>', unsafe_allow_html=True)
@@ -1077,7 +1488,7 @@ def tab_court_infrastructure(df: pd.DataFrame) -> None:
         fig2.update_layout(annotations=[dict(
             text=f"<b>{sec_p['Cases'].sum():,}</b><br><span style='font-size:9px;color:{COLORS['text_mid']}'>Total</span>",
             x=0.5, y=0.5, font=dict(size=18, color=COLORS["text_dark"]), showarrow=False)])
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True, key="chart_1432_fig2")
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
@@ -1101,13 +1512,16 @@ def tab_court_infrastructure(df: pd.DataFrame) -> None:
     ))
     fig3.update_xaxes(tickfont=dict(size=10, color=COLORS["text_dark"]), tickangle=-45, side="bottom", automargin=True)
     fig3.update_yaxes(tickfont=dict(size=10, color=COLORS["text_dark"]), automargin=True)
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(fig3, use_container_width=True, key="chart_1456_fig3")
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
     st.markdown('<div class="sec-title">👨‍⚖️ Judge × Section Distribution</div>', unsafe_allow_html=True)
     top_j = df["Judge_Short"].value_counts().head(15).index.tolist()
     j_sec = df[df["Judge_Short"].isin(top_j)].groupby(["Judge_Short", "Section_Clean"]).size().reset_index(name="Cases")
+    top_sections_j = j_sec.groupby("Section_Clean")["Cases"].sum().sort_values(ascending=False).head(8).index.tolist()
+    j_sec["Section_Clean"] = j_sec["Section_Clean"].where(j_sec["Section_Clean"].isin(top_sections_j), "Other")
+    j_sec = j_sec.groupby(["Judge_Short", "Section_Clean"], as_index=False)["Cases"].sum()
     j_sec["Judge_Disp"] = j_sec["Judge_Short"].apply(lambda x: truncate(x, 22))
     order_j = j_sec.groupby("Judge_Disp")["Cases"].sum().sort_values(ascending=False).index.tolist()
 
@@ -1124,7 +1538,7 @@ def tab_court_infrastructure(df: pd.DataFrame) -> None:
     fig4.update_xaxes(**axis_x(-40, tickfont=dict(size=10, color=COLORS["text_dark"])),
                       title=dict(text="Judge", font=dict(size=10, color=COLORS["text_mid"])), automargin=True)
     fig4.update_yaxes(**axis_y(tickfont=dict(size=10, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
-    st.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig4, use_container_width=True, key="chart_1479_fig4")
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
@@ -1157,7 +1571,56 @@ def tab_court_infrastructure(df: pd.DataFrame) -> None:
         ))
         fig5.update_xaxes(**axis_x(-30, tickfont=dict(size=10, color=COLORS["text_mid"])), title=dict(text="Month", font=dict(size=10, color=COLORS["text_mid"])))
         fig5.update_yaxes(**axis_y(tickfont=dict(size=10, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
-        st.plotly_chart(fig5, use_container_width=True)
+        st.plotly_chart(fig5, use_container_width=True, key="chart_1512_fig5")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col_k, col_l = st.columns(2, gap="medium")
+    with col_k:
+        st.markdown('<div class="sec-title">🗂️ Cases by Category (Top 15)</div>', unsafe_allow_html=True)
+        cat_full = value_counts_df(df["Case_Category"], "Category", blank_label="Uncategorized")
+        cat15 = collapse_top_n(cat_full, "Category", "Cases", top_n=15)
+        n_cat15 = len(cat15)
+        fig_cat15 = horizontal_bar_ranked(cat15, "Category", "Cases", height=min(max(n_cat15 * 32, 380), 520), label_len=30, single_color=COLORS["navy"], right_margin=60)
+        st.plotly_chart(fig_cat15, use_container_width=True, key="chart_1523_fig_cat15")
+
+    with col_l:
+        st.markdown('<div class="sec-title">🥧 Case Category Share</div>', unsafe_allow_html=True)
+        cat_don = collapse_top_n(cat_full.sort_values("Cases", ascending=False), "Category", "Cases", top_n=6, other_label="Other")
+        colors_cd = [COLORS["navy"], COLORS["gold"], COLORS["teal"], COLORS["green_acc"], COLORS["red"], COLORS["orange"], COLORS["text_light"]]
+        fig_catdon = donut_chart(cat_don, "Category", "Cases", height=min(max(n_cat15 * 32, 380), 520), label_len=26, colors=colors_cd, total_label="Total")
+        st.plotly_chart(fig_catdon, use_container_width=True, key="chart_1530_fig_catdon")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col_m, col_n = st.columns(2, gap="medium")
+    with col_m:
+        st.markdown('<div class="sec-title">📅 Days Active — Top 10 Sections</div>', unsafe_allow_html=True)
+        sec_days = df.dropna(subset=["Date"]).groupby("Section_Clean")["Date_Str"].nunique().reset_index()
+        sec_days.columns = ["Section", "Days"]
+        sec_days = sec_days.sort_values("Days", ascending=False).head(10)
+        fig_secdays = horizontal_bar_ranked(sec_days, "Section", "Days", height=380, label_len=30, single_color=COLORS["teal"], right_margin=50)
+        fig_secdays.update_xaxes(title=dict(text="Days Active", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_secdays, use_container_width=True, key="chart_1542_fig_secdays")
+
+    with col_n:
+        st.markdown('<div class="sec-title">⚖️ Avg. Cases / Day — Top 10 Sections</div>', unsafe_allow_html=True)
+        sec_rate = df.dropna(subset=["Date"]).groupby("Section_Clean").agg(Cases=("Case_No", "count"), Days=("Date_Str", "nunique")).reset_index()
+        sec_rate["Rate"] = (sec_rate["Cases"] / sec_rate["Days"].replace(0, 1)).round(1)
+        sec_rate = sec_rate.rename(columns={"Section_Clean": "Section"}).sort_values("Rate", ascending=False).head(10)
+        fig_secrate = horizontal_bar_ranked(sec_rate, "Section", "Rate", height=380, label_len=30, single_color=COLORS["gold"], right_margin=50)
+        fig_secrate.update_xaxes(title=dict(text="Cases per Day", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_secrate, use_container_width=True, key="chart_1551_fig_secrate")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-title">👨‍⚖️ Unique Judges per Section (Top 10)</div>', unsafe_allow_html=True)
+    sec_judges = df.groupby("Section_Clean")["Judge_Short"].nunique().reset_index()
+    sec_judges.columns = ["Section", "Judges"]
+    sec_judges = sec_judges.sort_values("Judges", ascending=False).head(10)
+    fig_secj = horizontal_bar_ranked(sec_judges, "Section", "Judges", height=380, label_len=32, single_color=COLORS["purple"], right_margin=50)
+    fig_secj.update_xaxes(title=dict(text="Unique Judges", font=dict(size=10, color=COLORS["text_mid"])))
+    st.plotly_chart(fig_secj, use_container_width=True, key="chart_1561_fig_secj")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1184,7 +1647,7 @@ def tab_lawyer_intelligence(df: pd.DataFrame) -> None:
         fig.update_layout(**base_layout(height=480))
         fig.update_xaxes(**axis_x())
         fig.update_yaxes(**axis_y(), autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="chart_1588_fig")
 
     with col2:
         st.markdown('<div class="sec-title">🧑‍💼 Top 10 Respondent Advocates</div>', unsafe_allow_html=True)
@@ -1195,7 +1658,7 @@ def tab_lawyer_intelligence(df: pd.DataFrame) -> None:
         fig2.update_layout(**base_layout(height=480))
         fig2.update_xaxes(**axis_x())
         fig2.update_yaxes(**axis_y(), autorange="reversed")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True, key="chart_1599_fig2")
 
     st.markdown('<div class="sec-title">Lawyer Search — Find All Hearings by Advocate Name</div>', unsafe_allow_html=True)
     lq = st.text_input("", placeholder="Type advocate name...", key="lsearch", label_visibility="collapsed")
@@ -1222,10 +1685,129 @@ def tab_lawyer_intelligence(df: pd.DataFrame) -> None:
     t10["Advocate"] = t10["Advocate"].apply(lambda x: truncate(x, 35))
     fig3 = px.bar(t10, x="Advocate", y="Cases", color_discrete_sequence=[COLORS["navy"]], text="Cases")
     fig3.update_traces(marker_line_width=0, textposition="outside", textfont_size=8)
-    fig3.update_layout(**base_layout(height=340))
-    fig3.update_xaxes(**axis_x(-40))
+    fig3.update_layout(**base_layout(height=340, margin=dict(l=50, r=20, t=20, b=110)))
+    fig3.update_xaxes(**axis_x(-40), automargin=True)
     fig3.update_yaxes(**axis_y())
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(fig3, use_container_width=True, key="chart_1629_fig3")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col3, col4 = st.columns(2, gap="medium")
+    with col3:
+        st.markdown('<div class="sec-title">🥧 Petitioner vs Respondent Role Split</div>', unsafe_allow_html=True)
+        role_split = all_adv.groupby("Role")["Cases"].sum().reset_index()
+        fig_role = donut_chart(role_split, "Role", "Cases", height=340, label_len=20,
+                                colors=[COLORS["dark_green"], COLORS["teal"]], total_label="Total")
+        st.plotly_chart(fig_role, use_container_width=True, key="chart_1639_fig_role")
+
+    with col4:
+        st.markdown('<div class="sec-title">👨‍⚖️ Top 10 Advocates — Unique Judges Appeared Before</div>', unsafe_allow_html=True)
+        adv_long = pd.concat([
+            df.loc[df["Petitioner_Advocate"] != "", ["Petitioner_Advocate", "Judge_Short"]].rename(columns={"Petitioner_Advocate": "Advocate"}),
+            df.loc[df["Respondent_Advocate"] != "", ["Respondent_Advocate", "Judge_Short"]].rename(columns={"Respondent_Advocate": "Advocate"}),
+        ])
+        adv_judges = adv_long.groupby("Advocate")["Judge_Short"].nunique().reset_index()
+        adv_judges.columns = ["Advocate", "Judges"]
+        adv_judges = adv_judges.sort_values("Judges", ascending=False).head(10)
+        fig_advj = horizontal_bar_ranked(adv_judges, "Advocate", "Judges", height=340, label_len=28, single_color=COLORS["purple"], right_margin=50)
+        fig_advj.update_xaxes(title=dict(text="Unique Judges", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_advj, use_container_width=True, key="chart_1652_fig_advj")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col5, col6 = st.columns(2, gap="medium")
+    with col5:
+        st.markdown('<div class="sec-title">🗂️ Top 10 Advocates — Unique Case Categories</div>', unsafe_allow_html=True)
+        adv_long2 = pd.concat([
+            df.loc[df["Petitioner_Advocate"] != "", ["Petitioner_Advocate", "Case_Category"]].rename(columns={"Petitioner_Advocate": "Advocate"}),
+            df.loc[df["Respondent_Advocate"] != "", ["Respondent_Advocate", "Case_Category"]].rename(columns={"Respondent_Advocate": "Advocate"}),
+        ])
+        adv_long2["Case_Category"] = adv_long2["Case_Category"].replace("", "Uncategorized")
+        adv_cats = adv_long2.groupby("Advocate")["Case_Category"].nunique().reset_index()
+        adv_cats.columns = ["Advocate", "Categories"]
+        adv_cats = adv_cats.sort_values("Categories", ascending=False).head(10)
+        fig_advc = horizontal_bar_ranked(adv_cats, "Advocate", "Categories", height=340, label_len=28, single_color=COLORS["red"], right_margin=50)
+        fig_advc.update_xaxes(title=dict(text="Unique Categories", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_advc, use_container_width=True, key="chart_1669_fig_advc")
+
+    with col6:
+        st.markdown('<div class="sec-title">📊 Advocate Caseload Distribution</div>', unsafe_allow_html=True)
+        fig_hist = px.histogram(total_adv, x="Cases", nbins=20, color_discrete_sequence=[COLORS["gold"]])
+        fig_hist.update_traces(marker_line_width=0, hovertemplate="Cases: %{x}<br>Advocates: %{y}<extra></extra>")
+        fig_hist.update_layout(**base_layout(height=340, margin=dict(l=50, r=20, t=20, b=50), bargap=0.1))
+        fig_hist.update_xaxes(**axis_x(), title=dict(text="Cases Handled", font=dict(size=10, color=COLORS["text_mid"])))
+        fig_hist.update_yaxes(**axis_y(), title=dict(text="Number of Advocates", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_hist, use_container_width=True, key="chart_1678_fig_hist")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-title">📈 Top 5 Advocates — Activity Trend</div>', unsafe_allow_html=True)
+    adv_trend_df = df.dropna(subset=["Date"]).copy()
+    if adv_trend_df.empty:
+        st.info("No dated records available for the current filter.")
+    else:
+        adv_trend_df["Date_Label"] = adv_trend_df["Date"].dt.strftime("%d %b")
+        order_lbls_a = adv_trend_df.drop_duplicates("Date").sort_values("Date")["Date_Label"].tolist()
+        top5_adv = total_adv.head(5)["Advocate"].tolist()
+        adv_long3 = pd.concat([
+            adv_trend_df.loc[adv_trend_df["Petitioner_Advocate"] != "", ["Date", "Date_Label", "Petitioner_Advocate"]].rename(columns={"Petitioner_Advocate": "Advocate"}),
+            adv_trend_df.loc[adv_trend_df["Respondent_Advocate"] != "", ["Date", "Date_Label", "Respondent_Advocate"]].rename(columns={"Respondent_Advocate": "Advocate"}),
+        ])
+        adv_line = (
+            adv_long3[adv_long3["Advocate"].isin(top5_adv)]
+            .groupby(["Date", "Date_Label", "Advocate"]).size()
+            .reset_index(name="Cases").sort_values("Date")
+        )
+        line_colors4 = [COLORS["dark_green"], COLORS["gold"], COLORS["teal"], COLORS["red"], COLORS["purple"]]
+        fig_advtrend = go.Figure()
+        for i, aname in enumerate(top5_adv):
+            adata = adv_line[adv_line["Advocate"] == aname]
+            label = truncate(aname, 28)
+            fig_advtrend.add_trace(go.Scatter(
+                x=adata["Date_Label"], y=adata["Cases"], mode="lines+markers", name=label,
+                line=dict(width=2.5, color=line_colors4[i % len(line_colors4)]), marker=dict(size=6),
+                hovertemplate=f"<b>{label}</b><br>%{{x}}<br>Cases: %{{y}}<extra></extra>",
+            ))
+        fig_advtrend.update_layout(**base_layout(
+            height=340, margin=dict(l=50, r=20, t=40, b=50),
+            legend=dict(orientation="h", x=0.5, y=1.15, xanchor="center", yanchor="bottom", font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+        ))
+        fig_advtrend.update_xaxes(**axis_x(-30 if len(order_lbls_a) > 10 else 0, tickfont=dict(size=10, color=COLORS["text_mid"])),
+                                   type="category", categoryorder="array", categoryarray=order_lbls_a)
+        fig_advtrend.update_yaxes(**axis_y(tickfont=dict(size=10, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_advtrend, use_container_width=True, key="chart_1716_fig_advtrend")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    col7, col8 = st.columns(2, gap="medium")
+    with col7:
+        st.markdown('<div class="sec-title">📁 Top 10 Advocates — Unique Sections</div>', unsafe_allow_html=True)
+        adv_long4 = pd.concat([
+            df.loc[df["Petitioner_Advocate"] != "", ["Petitioner_Advocate", "Section_Clean"]].rename(columns={"Petitioner_Advocate": "Advocate"}),
+            df.loc[df["Respondent_Advocate"] != "", ["Respondent_Advocate", "Section_Clean"]].rename(columns={"Respondent_Advocate": "Advocate"}),
+        ])
+        adv_secs = adv_long4.groupby("Advocate")["Section_Clean"].nunique().reset_index()
+        adv_secs.columns = ["Advocate", "Sections"]
+        adv_secs = adv_secs.sort_values("Sections", ascending=False).head(10)
+        fig_advs = horizontal_bar_ranked(adv_secs, "Advocate", "Sections", height=340, label_len=28, single_color=COLORS["green_acc"], right_margin=50)
+        fig_advs.update_xaxes(title=dict(text="Unique Sections", font=dict(size=10, color=COLORS["text_mid"])))
+        st.plotly_chart(fig_advs, use_container_width=True, key="chart_1732_fig_advs")
+
+    with col8:
+        st.markdown('<div class="sec-title">🏆 Top Advocate — Category Breakdown</div>', unsafe_allow_html=True)
+        top_adv_name = total_adv.iloc[0]["Advocate"] if not total_adv.empty else None
+        if top_adv_name:
+            ta_df = pd.concat([
+                df.loc[(df["Petitioner_Advocate"] == top_adv_name), ["Case_Category"]],
+                df.loc[(df["Respondent_Advocate"] == top_adv_name), ["Case_Category"]],
+            ])
+            ta_cats = value_counts_df(ta_df["Case_Category"], "Category", blank_label="Uncategorized").head(6)
+            colors_ta = [COLORS["dark_green"], COLORS["gold"], COLORS["teal"], COLORS["red"], COLORS["orange"], COLORS["purple"]]
+            fig_tacat = donut_chart(ta_cats, "Category", "Cases", height=340, label_len=24, colors=colors_ta, total_label=truncate(top_adv_name, 18))
+            st.plotly_chart(fig_tacat, use_container_width=True, key="chart_1745_fig_tacat")
+        else:
+            st.info("No advocate data available.")
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1303,6 +1885,26 @@ def tab_case_search(df: pd.DataFrame) -> None:
     repeated_cases = set(df["Case_No"].value_counts()[df["Case_No"].value_counts() > 1].index)
 
     st.markdown(f'<div class="info-box">🔍 <b>{len(results):,}</b> result(s) for "<b>{query}</b>"</div>', unsafe_allow_html=True)
+
+    if not results.empty and len(results) > 1:
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        colx, coly, colz = st.columns(3, gap="medium")
+        with colx:
+            st.markdown('<div class="sec-title">🗂️ Results by Category</div>', unsafe_allow_html=True)
+            rc = value_counts_df(results["Case_Category"], "Category", blank_label="Uncategorized").head(8)
+            fig_rc = horizontal_bar_ranked(rc, "Category", "Cases", height=280, label_len=22, single_color=COLORS["navy"], right_margin=40)
+            st.plotly_chart(fig_rc, use_container_width=True, key="chart_1834_fig_rc")
+        with coly:
+            st.markdown('<div class="sec-title">👨‍⚖️ Results by Judge</div>', unsafe_allow_html=True)
+            rj = value_counts_df(results["Judge_Short"], "Judge").head(8)
+            fig_rj = horizontal_bar_ranked(rj, "Judge", "Cases", height=280, label_len=22, single_color=COLORS["teal"], right_margin=40)
+            st.plotly_chart(fig_rj, use_container_width=True, key="chart_1839_fig_rj")
+        with colz:
+            st.markdown('<div class="sec-title">📋 Results by Section</div>', unsafe_allow_html=True)
+            rs = value_counts_df(results["Section_Clean"], "Section").head(8)
+            fig_rs = horizontal_bar_ranked(rs, "Section", "Cases", height=280, label_len=22, single_color=COLORS["gold"], right_margin=40)
+            st.plotly_chart(fig_rs, use_container_width=True, key="chart_1844_fig_rs")
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
     if results.empty:
         st.markdown(
