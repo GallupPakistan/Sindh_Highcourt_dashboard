@@ -549,9 +549,12 @@ def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
 
     df = pd.concat(frames, ignore_index=True)
     df.fillna("", inplace=True)
+<<<<<<< HEAD
     if "City" not in df.columns:
         df["City"] = "Karachi"
     df["City"] = df["City"].astype(str).str.strip()
+=======
+>>>>>>> f0f5d9a364c7562867acc0f28462d98f39df8e43
     # in load_data, right after df.fillna("", inplace=True)
     garbage_mask = df["Section"].str.contains(r"(?i)^for\s+", regex=True)
     print(df.loc[garbage_mask, "Section"].value_counts().head(20))
