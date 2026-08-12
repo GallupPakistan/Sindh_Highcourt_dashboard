@@ -13,7 +13,7 @@ import streamlit as st
 from datetime import datetime
 from pathlib import Path
 
-APP_BUILD = "2026-07-22-axis-fix-v2"
+APP_BUILD = "2026-08-12-folder-fix-v3"
 
 st.set_page_config(
     page_title="Sindh High Court — Cause List Analytics",
@@ -53,10 +53,15 @@ DONUT_PALETTE = [
 FONT = dict(family="Inter", color=COLORS["text_dark"], size=11)
 GRID_STYLE = dict(gridcolor="#EAF7F0", linecolor="#D5EDDF")
 
+
+# ═══════════════════════════════════════════════════════════════
+# CAUSE LIST FOLDER — robust upward search
+# ═══════════════════════════════════════════════════════════════
 def find_cause_list_folder(start: Path) -> Path:
     """Search upward from the script's location for a 'cause_lists' folder.
     This makes the app resilient to differences in folder depth between
-    local development and the deployed environment (Streamlit Cloud)."""
+    local development and the deployed environment (Streamlit Cloud),
+    instead of relying on a fixed number of `.parent` hops."""
     current = start.resolve()
     for _ in range(6):  # search up to 6 levels up
         candidate = current / "cause_lists"
@@ -70,6 +75,7 @@ def find_cause_list_folder(start: Path) -> Path:
 
 
 CAUSE_LIST_FOLDER = find_cause_list_folder(Path(__file__).parent)
+
 
 # ═══════════════════════════════════════════════════════════════
 # ICONS
@@ -113,10 +119,6 @@ def inject_css() -> None:
         .main { background: linear-gradient(160deg, #EEF1F0 0%, #E4E9E6 100%) !important; }
         .main .block-container { padding: 0 !important; max-width: 100% !important; }
 
-        /* ── SIDEBAR SHELL ──────────────────────────────────────
-           Outer sidebar is transparent; the inner wrapper carries
-           the background, rounded corners and its own scrollbar,
-           so the banner can stick to the top of that scroll area. */
         [data-testid="stSidebar"] {
             background: transparent !important;
             border-right: none !important;
@@ -132,14 +134,6 @@ def inject_css() -> None:
             padding-top: 0 !important;
         }
         section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] { gap: 0 !important; }
-        /* Take Streamlit's built-in sidebar header out of the flow entirely,
-           so it can no longer push the banner down or leave a gap above it.
-           Its collapse icon is repositioned as a simple button sitting on
-           top of the banner's top-right corner. */
-        /* Remove Streamlit's built-in left/right padding on the whole
-           sidebar content area (this was the source of the side gaps
-           around the banner), then restore that padding only for the
-           elements below the banner (filters, buttons, info text). */
         [data-testid="stSidebarContent"] { padding-left: 0 !important; padding-right: 0 !important; }
         [data-testid="stSidebarUserContent"] > div { padding-left: 1.1rem !important; padding-right: 1.1rem !important; }
         [data-testid="stSidebarUserContent"] > div:has(.sb-logo) { padding-left: 0 !important; padding-right: 0 !important; }
@@ -339,9 +333,6 @@ def inject_css() -> None:
         .empty .et { font-size:1rem; font-weight:600; color:#0E241B; margin-top:0.5rem; }
         .empty .es { font-size:0.82rem; margin-top:0.2rem; }
 
-        /* ── SIDEBAR BANNER ──────────────────────────────────────
-           Sticky to the top of the sidebar's own scroll area, fills
-           the full width/top corners, and never scrolls away. */
         .sb-logo {
             background: linear-gradient(135deg, #0F2E22, #1FA463);
             padding: 1.3rem 1.1rem;
@@ -389,8 +380,6 @@ def inject_css() -> None:
         header { background: transparent !important; box-shadow: none !important; }
         header [data-testid="stToolbar"] { visibility: hidden !important; }
 
-        /* Sidebar re-open button — must stay visible even though the
-           header/toolbar around it is hidden (Streamlit 1.59+) */
         [data-testid="stExpandSidebarButton"] {
             visibility: visible !important;
             display: flex !important;
@@ -419,13 +408,6 @@ def inject_css() -> None:
 # ═══════════════════════════════════════════════════════════════
 import re as _re
 
-# ── Cleaning constants ───────────────────────────────────────────
-
-# Advocate: overflow pattern — a case reference token that signals
-# the start of bundled companion-case data.
-# Matches patterns like "Cr.Bail 1457/2023", "Cr.Misc. Appln 1148/2025",
-# "Const. P. 3612/2024" embedded inside an advocate cell, whether they
-# appear mid-string (after a space) or at the very start of the value.
 _ADVOCATE_OVERFLOW = _re.compile(
     r"(?:(?<=\s)|^)"
     r"(?:Cr\.\w[\w\.]*\s*(?:Appln|Appeal|Rev|Bail|Acq|Tran|Acctt[^,]*)?\s+|"
@@ -434,7 +416,6 @@ _ADVOCATE_OVERFLOW = _re.compile(
     _re.IGNORECASE,
 )
 
-# Case_Category: normalise typos and near-duplicate labels.
 _CAT_MAP: dict[str, str] = {
     "AGAINST THE ORDER":              "AGAINST ORDER",
     "AGAINST THE JUDGEMENT":          "AGAINST JUDGEMENT",
@@ -445,8 +426,6 @@ _CAT_MAP: dict[str, str] = {
     "W.W.F":                          "WWF",
 }
 
-# Case_No prefix pattern that identifies criminal-matter cases
-# (used to fill empty Case_Category rows).
 _CRIMINAL_CASE_PREFIX = _re.compile(r"^(Cr\.|Spl\.Cr\.|Criminal)", _re.IGNORECASE)
 
 
@@ -466,13 +445,6 @@ def _clean_section(df: pd.DataFrame) -> pd.DataFrame:
     df["Section"] = df["Section"].apply(
         lambda s: s if s.upper() in _VALID_SECTIONS else ""
     )
-
-    print("=== SECTION DEBUG ===")
-    print(df["Section"].value_counts(dropna=False).head(20))
-    candidates = df["Section"].replace("", pd.NA).dropna().str.upper().str.strip()
-    near_misses = set(df["Section"].str.upper().str.strip().unique()) - _VALID_SECTIONS - {""}
-    print("NOT IN WHITELIST:", near_misses)
-
     df["Section"] = df["Section"].replace("", pd.NA)
     df["Section"] = (
         df.groupby("Bench", sort=False)["Section"]
@@ -483,10 +455,7 @@ def _clean_section(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _clean_advocate(val: str) -> str:
-    """Strip companion-case overflow text from an advocate cell.
-    Overflow always follows a whitespace boundary (the regex requires it),
-    so after stripping we check if anything useful remains before the match.
-    """
+    """Strip companion-case overflow text from an advocate cell."""
     val = val.strip()
     if not val:
         return val
@@ -498,10 +467,6 @@ def _clean_advocate(val: str) -> str:
 
 
 def _clean_case_category(row: pd.Series) -> str:
-    """Return a normalised Case_Category:
-    • Apply the explicit deduplication map.
-    • For still-empty cells, infer from the Case_No prefix.
-    """
     cat = _CAT_MAP.get(row["Case_Category"], row["Case_Category"]).strip()
     if cat:
         return cat
@@ -514,6 +479,8 @@ def folder_signature(folder: Path) -> tuple:
     """Fingerprint of the folder's contents (name, size, mtime) so that
     st.cache_data invalidates automatically whenever a file changes,
     without waiting for the TTL to expire."""
+    if not folder.exists():
+        return tuple()
     files = sorted(folder.glob("Sindh_Cause_List_*.xlsx"))
     return tuple((f.name, f.stat().st_size, f.stat().st_mtime) for f in files)
 
@@ -529,6 +496,9 @@ def _parse_date(row: pd.Series):
 
 @st.cache_data(ttl=300)
 def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
+    if not folder.exists():
+        return pd.DataFrame()
+
     files = sorted(folder.glob("Sindh_Cause_List_*.xlsx"))
     if not files:
         return pd.DataFrame()
@@ -544,21 +514,11 @@ def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
 
     df = pd.concat(frames, ignore_index=True)
     df.fillna("", inplace=True)
-    # in load_data, right after df.fillna("", inplace=True)
-    garbage_mask = df["Section"].str.contains(r"(?i)^for\s+", regex=True)
-    print(df.loc[garbage_mask, "Section"].value_counts().head(20))
-    print("---RAW UNIQUE SECTIONS---")
-    print(df["Section"].unique()[:40])
     df.drop_duplicates(inplace=True)
 
     # ── Data cleaning ────────────────────────────────────────────
-    # 1. Section: remove garbage strings, forward/back-fill within bench
     df = _clean_section(df)
-
-    # 2. Advocate overflow: strip embedded companion-case text
     df["Respondent_Advocate"] = df["Respondent_Advocate"].apply(_clean_advocate)
-
-    # 3. Case_Category: normalise typos + infer from Case_No where blank
     df["Case_Category"] = df.apply(_clean_case_category, axis=1)
     # ── End cleaning ─────────────────────────────────────────────
 
@@ -778,20 +738,24 @@ def render_sidebar() -> pd.DataFrame:
         if st.button("🔄  Refresh Data", use_container_width=True):
             load_data.clear()
             st.rerun()
-            st.write("DEBUG — script location:", Path(__file__).resolve())
-    st.write("DEBUG — cause_lists folder path:", CAUSE_LIST_FOLDER.resolve())
-    st.write("DEBUG — folder exists?:", CAUSE_LIST_FOLDER.exists())
-    if CAUSE_LIST_FOLDER.exists():
-    all_files = list(CAUSE_LIST_FOLDER.iterdir())
-    st.write("DEBUG — all files in folder:", all_files)
-    matched = list(CAUSE_LIST_FOLDER.glob("Sindh_Cause_List_*.xlsx"))
-    st.write("DEBUG — files matching pattern 'Sindh_Cause_List_*.xlsx':", matched)
-
-df_all = load_data(CAUSE_LIST_FOLDER, folder_signature(CAUSE_LIST_FOLDER))
 
         df_all = load_data(CAUSE_LIST_FOLDER, folder_signature(CAUSE_LIST_FOLDER))
         if df_all.empty:
             st.error("No data found in cause_lists folder.")
+            with st.expander("🔧 Debug info (click to expand)"):
+                st.write("Script location:", Path(__file__).resolve())
+                st.write("Looking for cause_lists at:", CAUSE_LIST_FOLDER.resolve())
+                st.write("Folder exists?:", CAUSE_LIST_FOLDER.exists())
+                if CAUSE_LIST_FOLDER.exists():
+                    all_files = list(CAUSE_LIST_FOLDER.iterdir())
+                    st.write("All files in folder:", all_files)
+                    matched = list(CAUSE_LIST_FOLDER.glob("Sindh_Cause_List_*.xlsx"))
+                    st.write("Files matching 'Sindh_Cause_List_*.xlsx':", matched)
+                else:
+                    # Show what IS around the script, to help locate the real folder
+                    repo_guess = Path(__file__).resolve().parent.parent
+                    if repo_guess.exists():
+                        st.write(f"Contents of {repo_guess}:", list(repo_guess.iterdir()))
             st.stop()
 
         st.markdown('<div class="sb-section">Filters</div>', unsafe_allow_html=True)
@@ -909,11 +873,6 @@ def tab_overview(df: pd.DataFrame) -> None:
     st.markdown('<div class="sec-title">📈 Case Volume Over Time</div>', unsafe_allow_html=True)
     daily = df.groupby("Date").size().reset_index(name="Cases").sort_values("Date")
     daily["MA3"] = daily["Cases"].rolling(3, min_periods=1).mean().round(0)
-    # Use a categorical (string) axis for the dates instead of a continuous date
-    # axis — with only a handful of days loaded, Plotly's automatic date-tick
-    # generator was producing duplicate/overlapping labels (each date rendered
-    # twice, see reported bug). A category axis guarantees exactly one tick
-    # per date, eliminating the overlap.
     daily["Date_Label"] = daily["Date"].dt.strftime("%d %b")
 
     fig_trend = go.Figure()
