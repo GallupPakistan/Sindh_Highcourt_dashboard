@@ -399,9 +399,63 @@ def build_records(text: str, city: str) -> list:
 # -------------------------------------------------------
 # SAVE COMBINED RECORDS TO ONE MASTER EXCEL FILE
 # -------------------------------------------------------
+def load_existing_master_records(output_dir: Path) -> list:
+    """Loads records already present in the master Excel file (if any),
+    so a new run can merge into the existing history instead of
+    overwriting it."""
+    filename = output_dir / MASTER_FILENAME
+    if not filename.exists():
+        return []
+
+    try:
+        wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+        wb.close()
+    except Exception as e:
+        print(f"[WARN] Could not read existing master file to merge: {e}")
+        return []
+
+    column_headers = [
+        "City", "Sr_No", "Global_Sr", "Bench", "Section",
+        "Case_No", "Case_Category", "Petitioner", "Respondent",
+        "Petitioner_Advocate", "Respondent_Advocate",
+        "Day", "Month", "Year"
+    ]
+    existing = []
+    for row in rows:
+        if row is None or all(v is None for v in row):
+            continue
+        record = {h: ("" if v is None else v) for h, v in zip(column_headers, row)}
+        existing.append(record)
+    return existing
+
+
 def save_master_excel(records: list, output_dir: Path) -> None:
-    """Writes all combined records (all cities, all dates) to one master Excel file."""
-    if not records:
+    """Writes all combined records (all cities, all dates) to one master Excel file.
+    Merges with whatever is already in the master file so incremental runs
+    (e.g. a GitHub Actions job that only fetches the last few days) add to
+    the history instead of replacing it."""
+    existing_records = load_existing_master_records(output_dir)
+    if existing_records:
+        print(f"[INFO] Merging {len(records)} new record(s) with {len(existing_records)} existing record(s).")
+
+    combined = existing_records + records
+
+    # De-duplicate: same City + Case_No + Day + Month + Year + Sr_No identifies
+    # the same listing, so re-running an already-covered date doesn't create
+    # duplicate rows in the master file.
+    seen = set()
+    deduped = []
+    for r in combined:
+        key = (r.get("City", ""), r.get("Case_No", ""), r.get("Day", ""),
+               r.get("Month", ""), r.get("Year", ""), r.get("Sr_No", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+
+    if not deduped:
         print("\n[WARN] No records found across any bench/date. Master file not created.")
         return
 
@@ -417,7 +471,7 @@ def save_master_excel(records: list, output_dir: Path) -> None:
     ]
     ws.append(column_headers)
 
-    for r in records:
+    for r in deduped:
         ws.append([
             r["City"], r["Sr_No"], r["Global_Sr"], r["Bench"], r["Section"],
             r["Case_No"], r["Case_Category"], r["Petitioner"], r["Respondent"],
@@ -449,7 +503,7 @@ def save_master_excel(records: list, output_dir: Path) -> None:
     print("=" * 60)
     print("[OK] Master combined Excel file saved successfully.")
     print(f"     {filename}")
-    print(f"     Total records: {len(records)}")
+    print(f"     Total records in master file: {len(deduped)}")
     print("=" * 60)
 
 
