@@ -126,14 +126,6 @@ def inject_css() -> None:
             padding-top: 0 !important;
         }
         section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] { gap: 0 !important; }
-        /* Take Streamlit's built-in sidebar header out of the flow entirely,
-           so it can no longer push the banner down or leave a gap above it.
-           Its collapse icon is repositioned as a simple button sitting on
-           top of the banner's top-right corner. */
-        /* Remove Streamlit's built-in left/right padding on the whole
-           sidebar content area (this was the source of the side gaps
-           around the banner), then restore that padding only for the
-           elements below the banner (filters, buttons, info text). */
         [data-testid="stSidebarContent"] { padding-left: 0 !important; padding-right: 0 !important; }
         [data-testid="stSidebarUserContent"] > div { padding-left: 1.1rem !important; padding-right: 1.1rem !important; }
         [data-testid="stSidebarUserContent"] > div:has(.sb-logo) { padding-left: 0 !important; padding-right: 0 !important; }
@@ -194,7 +186,7 @@ def inject_css() -> None:
         .top-banner {
             background: linear-gradient(120deg, #0F2E22 0%, #16523C 45%, #1FA463 100%);
             padding: 1.6rem 2.2rem; display: flex; align-items: center; justify-content: space-between;
-            margin: 0.8rem 1.2rem 0 1.2rem; border-radius: 20px; position: relative;
+            margin: 0.2rem 1.2rem 0 1.2rem; border-radius: 20px; position: relative;
             box-shadow: 0 10px 30px rgba(15,46,34,0.25);
         }
         .top-banner::after {
@@ -414,12 +406,6 @@ def inject_css() -> None:
 import re as _re
 
 # ── Cleaning constants ───────────────────────────────────────────
-
-# Advocate: overflow pattern — a case reference token that signals
-# the start of bundled companion-case data.
-# Matches patterns like "Cr.Bail 1457/2023", "Cr.Misc. Appln 1148/2025",
-# "Const. P. 3612/2024" embedded inside an advocate cell, whether they
-# appear mid-string (after a space) or at the very start of the value.
 _ADVOCATE_OVERFLOW = _re.compile(
     r"(?:(?<=\s)|^)"
     r"(?:Cr\.\w[\w\.]*\s*(?:Appln|Appeal|Rev|Bail|Acq|Tran|Acctt[^,]*)?\s+|"
@@ -428,7 +414,6 @@ _ADVOCATE_OVERFLOW = _re.compile(
     _re.IGNORECASE,
 )
 
-# Case_Category: normalise typos and near-duplicate labels.
 _CAT_MAP: dict[str, str] = {
     "AGAINST THE ORDER":              "AGAINST ORDER",
     "AGAINST THE JUDGEMENT":          "AGAINST JUDGEMENT",
@@ -439,8 +424,6 @@ _CAT_MAP: dict[str, str] = {
     "W.W.F":                          "WWF",
 }
 
-# Case_No prefix pattern that identifies criminal-matter cases
-# (used to fill empty Case_Category rows).
 _CRIMINAL_CASE_PREFIX = _re.compile(r"^(Cr\.|Spl\.Cr\.|Criminal)", _re.IGNORECASE)
 
 
@@ -477,10 +460,6 @@ def _clean_section(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _clean_advocate(val: str) -> str:
-    """Strip companion-case overflow text from an advocate cell.
-    Overflow always follows a whitespace boundary (the regex requires it),
-    so after stripping we check if anything useful remains before the match.
-    """
     val = val.strip()
     if not val:
         return val
@@ -492,10 +471,6 @@ def _clean_advocate(val: str) -> str:
 
 
 def _clean_case_category(row: pd.Series) -> str:
-    """Return a normalised Case_Category:
-    • Apply the explicit deduplication map.
-    • For still-empty cells, infer from the Case_No prefix.
-    """
     cat = _CAT_MAP.get(row["Case_Category"], row["Case_Category"]).strip()
     if cat:
         return cat
@@ -505,9 +480,6 @@ def _clean_case_category(row: pd.Series) -> str:
 
 
 def folder_signature(folder: Path) -> tuple:
-    """Fingerprint of the folder's contents (name, size, mtime) so that
-    st.cache_data invalidates automatically whenever a file changes,
-    without waiting for the TTL to expire."""
     files = sorted(folder.glob("Sindh_Cause_List_*.xlsx"))
     return tuple((f.name, f.stat().st_size, f.stat().st_mtime) for f in files)
 
@@ -556,7 +528,6 @@ def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
     if "City" not in df.columns:
         df["City"] = "Karachi"
     df["City"] = df["City"].astype(str).str.strip()
-    # in load_data, right after df.fillna("", inplace=True)
     garbage_mask = df["Section"].str.contains(r"(?i)^for\s+", regex=True)
     print(df.loc[garbage_mask, "Section"].value_counts().head(20))
     print("---RAW UNIQUE SECTIONS---")
@@ -564,17 +535,13 @@ def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
     df.drop_duplicates(inplace=True)
 
     # ── Data cleaning ────────────────────────────────────────────
-    # 1. Section: remove garbage strings, forward/back-fill within bench
     df = _clean_section(df)
-
-    # 2. Advocate overflow: strip embedded companion-case text
     df["Respondent_Advocate"] = df["Respondent_Advocate"].apply(_clean_advocate)
-
-    # 3. Case_Category: normalise typos + infer from Case_No where blank
     df["Case_Category"] = df.apply(_clean_case_category, axis=1)
     # ── End cleaning ─────────────────────────────────────────────
 
     df["Date"] = df.apply(_parse_date, axis=1)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Date_Str"] = df["Date"].apply(lambda d: d.strftime("%d %B %Y") if pd.notnull(d) else "")
     df["Judge_Short"] = (
         df["Bench"].str.replace("MR. JUSTICE ", "", regex=False)
@@ -617,7 +584,6 @@ def truncate(text: str, length: int) -> str:
 
 
 def collapse_top_n(counts: pd.DataFrame, label_col: str, value_col: str, top_n: int, other_label: str = "Others") -> pd.DataFrame:
-    """Keep the top N rows (by value_col, already sorted descending) and fold the rest into one 'Others' row."""
     if len(counts) <= top_n:
         return counts.copy()
     top = counts.head(top_n).copy()
@@ -627,7 +593,6 @@ def collapse_top_n(counts: pd.DataFrame, label_col: str, value_col: str, top_n: 
 
 
 def navy_to_steel_gradient(n: int) -> list:
-    """Return n colors fading from dark navy (index 0) to light steel-blue (index n-1)."""
     start, end = np.array([27, 42, 63]), np.array([190, 205, 225])
     colors = []
     for i in range(n):
@@ -638,9 +603,6 @@ def navy_to_steel_gradient(n: int) -> list:
 
 
 def nice_dtick(max_val: float, target_ticks: int = 5) -> float:
-    """Return a 'round' tick spacing (1/2/2.5/5 x a power of 10) so that a numeric
-    axis gets ~target_ticks evenly, cleanly spaced labels instead of letting
-    Plotly's auto tick-picker choose uneven values that render squeezed together."""
     if max_val <= 0:
         return 1
     raw_step = max_val / target_ticks
@@ -664,8 +626,6 @@ def horizontal_bar_ranked(
     right_margin: int = 60,
     x_headroom: float = 1.18,
 ) -> go.Figure:
-    """A horizontal ranked bar chart (ascending order, highest value on top),
-    with outside value labels — the pattern reused across every 'Top N' panel."""
     data = df_counts.copy()
     data["_disp"] = data[label_col].apply(lambda x: truncate(x, label_len))
     data = data.sort_values(value_col, ascending=True)
@@ -711,7 +671,6 @@ def donut_chart(
     total_label: str = "Total Cases",
     hole: float = 0.55,
 ) -> go.Figure:
-    """A donut chart with a centered total annotation — reused across every category/section breakdown."""
     data = df_counts.copy()
     data["_disp"] = data[label_col].apply(lambda x: truncate(x, label_len))
     total = data[value_col].sum()
@@ -804,7 +763,12 @@ def render_sidebar() -> pd.DataFrame:
         df_city = df_all if not sel_cities else df_all[df_all["City"].isin(sel_cities)]
         sel_city = "All Locations" if not sel_cities else (sel_cities[0] if len(sel_cities) == 1 else ", ".join(sel_cities))
 
-        avail_dates = sorted(df_city["Date_Str"].unique(), reverse=True)
+        date_map = (
+            df_city.dropna(subset=["Date"])
+            .drop_duplicates("Date_Str")
+            .sort_values("Date", ascending=False)
+        )
+        avail_dates = date_map["Date_Str"].tolist()
         sel_dates = st.multiselect("HEARING DATE", avail_dates, default=[], placeholder="All Dates")
 
         all_judges = sorted(df_city["Judge_Short"].unique())
@@ -842,6 +806,11 @@ def render_sidebar() -> pd.DataFrame:
         cat_f = filtered["Case_Category"].replace("", "Uncategorized")
         filtered = filtered[cat_f.isin(sel_cats)]
 
+    if MASTER_DATA_FILE.exists():
+        st.session_state["_file_updated"] = datetime.fromtimestamp(MASTER_DATA_FILE.stat().st_mtime).strftime("%d %B %Y")
+    else:
+        st.session_state["_file_updated"] = "—"
+
     st.session_state["_avail_dates"] = avail_dates
     st.session_state["_sel_city"] = sel_city
     return filtered
@@ -852,7 +821,7 @@ def render_sidebar() -> pd.DataFrame:
 # ═══════════════════════════════════════════════════════════════
 def render_banner(df: pd.DataFrame) -> None:
     avail_dates = st.session_state.get("_avail_dates", [])
-    last_updated = avail_dates[0] if avail_dates else "—"
+    last_updated = st.session_state.get("_file_updated", "—")
     sel_city = st.session_state.get("_sel_city", "All Locations")
     if sel_city == "All Locations":
         scope_label = "All Benches — Karachi, Hyderabad, Sukkur, Larkana & Mirpurkhas"
@@ -926,11 +895,6 @@ def tab_overview(df: pd.DataFrame) -> None:
     st.markdown('<div class="sec-title">📈 Case Volume Over Time</div>', unsafe_allow_html=True)
     daily = df.groupby("Date").size().reset_index(name="Cases").sort_values("Date")
     daily["MA3"] = daily["Cases"].rolling(3, min_periods=1).mean().round(0)
-    # Use a categorical (string) axis for the dates instead of a continuous date
-    # axis — with only a handful of days loaded, Plotly's automatic date-tick
-    # generator was producing duplicate/overlapping labels (each date rendered
-    # twice, see reported bug). A category axis guarantees exactly one tick
-    # per date, eliminating the overlap.
     daily["Date_Label"] = daily["Date"].dt.strftime("%d %b")
 
     fig_trend = go.Figure()
@@ -1101,7 +1065,8 @@ def tab_daily_cause_list(df: pd.DataFrame) -> None:
 
     col1, col2, col3, col4 = st.columns(4, gap="medium")
     with col1:
-        sel_d = st.selectbox("📅 Date", ["All Dates"] + sorted(df["Date_Str"].unique(), reverse=True), key="dcl_date")
+        date_opts = df.dropna(subset=["Date"]).drop_duplicates("Date_Str").sort_values("Date", ascending=False)["Date_Str"].tolist()
+        sel_d = st.selectbox("📅 Date", ["All Dates"] + date_opts, key="dcl_date")
     with col2:
         sel_j = st.selectbox("👨‍⚖️ Judge", ["All Judges"] + sorted(df["Judge_Short"].unique()), key="dcl_judge")
     with col3:
