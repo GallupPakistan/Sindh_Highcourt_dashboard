@@ -57,7 +57,11 @@ CAUSE_LIST_FOLDER = Path(__file__).parent.parent / "cause_lists"
 
 # New multi-bench master data (Karachi, Hyderabad, Sukkur, Larkana, Mirpurkhas
 # combined into one file with a City column).
-MASTER_DATA_FOLDER = Path(r"C:\Users\Hafiz Ahmed\Desktop\Sindh\Sindh\sindh_causelist_master")
+_candidates = [
+    Path(r"C:\Users\Hafiz Ahmed\Desktop\Sindh\Sindh\sindh_causelist_master"),  # local
+    Path(__file__).parent.parent / "sindh_causelist_master",                    # GitHub/deployed
+]
+MASTER_DATA_FOLDER = next((p for p in _candidates if p.exists()), _candidates[-1])
 MASTER_DATA_FILE = MASTER_DATA_FOLDER / "Sindh_Cause_List_Master_Combined.xlsx"
 
 
@@ -549,12 +553,9 @@ def load_data(folder: Path, _signature: tuple) -> pd.DataFrame:
 
     df = pd.concat(frames, ignore_index=True)
     df.fillna("", inplace=True)
-<<<<<<< HEAD
     if "City" not in df.columns:
         df["City"] = "Karachi"
     df["City"] = df["City"].astype(str).str.strip()
-=======
->>>>>>> f0f5d9a364c7562867acc0f28462d98f39df8e43
     # in load_data, right after df.fillna("", inplace=True)
     garbage_mask = df["Section"].str.contains(r"(?i)^for\s+", regex=True)
     print(df.loc[garbage_mask, "Section"].value_counts().head(20))
