@@ -1006,8 +1006,8 @@ def tab_overview(df: pd.DataFrame) -> None:
             fillcolor="rgba(31,164,99,0.15)",
             hovertemplate="<b>%{x}</b><br>Cumulative Cases: %{y:,}<extra></extra>",
         ))
-        fig_cum.update_layout(**base_layout(height=320, margin=dict(l=50, r=30, t=20, b=50)))
-        fig_cum.update_xaxes(**axis_x(-30 if len(cum) > 10 else 0, tickfont=dict(size=11, color=COLORS["text_mid"])),
+        fig_cum.update_layout(**base_layout(height=380, margin=dict(l=50, r=30, t=20, b=90)))
+        fig_cum.update_xaxes(**axis_x(-90 if len(cum) > 10 else 0, tickfont=dict(size=10, color=COLORS["text_mid"])),
                               type="category", categoryorder="array", categoryarray=cum["Date_Label"])
         fig_cum.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"])), title=dict(text="Cumulative Cases", font=dict(size=10, color=COLORS["text_mid"])))
         st.plotly_chart(fig_cum, use_container_width=True, key="chart_986_fig_cum")
@@ -1166,8 +1166,8 @@ def tab_daily_cause_list(df: pd.DataFrame) -> None:
                 x=daily_f["Date_Label"], y=daily_f["Cases"], marker_color=COLORS["dark_green"], marker_line_width=0,
                 hovertemplate="<b>%{x}</b><br>Cases: %{y:,}<extra></extra>",
             ))
-            fig_trendf.update_layout(**base_layout(height=320, margin=dict(l=50, r=30, t=20, b=50), bargap=0.3))
-            fig_trendf.update_xaxes(**axis_x(-30 if len(daily_f) > 10 else 0, tickfont=dict(size=11, color=COLORS["text_mid"])),
+            fig_trendf.update_layout(**base_layout(height=380, margin=dict(l=50, r=30, t=20, b=90), bargap=0.3))
+            fig_trendf.update_xaxes(**axis_x(-90 if len(daily_f) > 10 else 0, tickfont=dict(size=10, color=COLORS["text_mid"])),
                                      type="category", categoryorder="array", categoryarray=daily_f["Date_Label"])
             fig_trendf.update_yaxes(**axis_y(tickfont=dict(size=11, color=COLORS["text_mid"])), title=dict(text="Number of Cases", font=dict(size=10, color=COLORS["text_mid"])))
             st.plotly_chart(fig_trendf, use_container_width=True, key="chart_1145_fig_trendf")
