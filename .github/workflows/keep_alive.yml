@@ -1,0 +1,21 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    - cron: "12 */10 * * *"   # MINUTE ki jagah 0-59 mein koi bhi number daalo
+  workflow_dispatch:   # manual trigger ka option bhi milega
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit app
+        run: |
+          echo "Pinging Sindh_HC"
+          response=$(curl -s -o /dev/null -w "%{http_code}" "sindhhighcourtdashboard-ajle3yesxgwegsp9tdtykw.streamlit.app")
+          echo "HTTP response code: $response"
+          if [ "$response" -eq 200 ]; then
+            echo "App is awake and responding correctly."
+          else
+            echo "Warning: App did not return 200. Response code: $response"
+          fi
