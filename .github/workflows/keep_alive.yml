@@ -2,7 +2,7 @@ name: Keep Streamlit App Awake
 
 on:
   schedule:
-    - cron: "3 */10 * * *"
+    - cron: "2 */10 * * *"
   workflow_dispatch:
 
 jobs:
@@ -13,10 +13,5 @@ jobs:
         continue-on-error: true
         run: |
           echo "Pinging Sindh_HC..."
-          response=$(curl -s -L --max-redirs 10 -o /dev/null -w "%{http_code}" "https://sindhhighcourtdashboard-ajle3yesxgwegsp9tdtykw.streamlit.app" || echo "curl_failed")
-          echo "HTTP response code: $response"
-          if [ "$response" == "200" ]; then
-            echo "App is awake and responding correctly."
-          else
-            echo "Note: got response '$response' — may still be fine on cold start."
-          fi
+          curl -s -L --max-redirs 20 -o /dev/null "https://sindhhighcourtdashboard-ajle3yesxgwegsp9tdtykw.streamlit.app" || true
+          echo "Ping attempt finished (redirect behavior is normal for Streamlit apps)."
