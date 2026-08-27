@@ -12,7 +12,7 @@ jobs:
       - name: Ping Streamlit app
         run: |
           echo "Pinging Sindh_HC"
-          response=$(curl -s -o /dev/null -w "%{http_code}" "sindhhighcourtdashboard-ajle3yesxgwegsp9tdtykw.streamlit.app")
+          response=$(curl -s -L -o /dev/null -w "%{http_code}" "sindhhighcourtdashboard-ajle3yesxgwegsp9tdtykw.streamlit.app")
           echo "HTTP response code: $response"
           if [ "$response" -eq 200 ]; then
             echo "App is awake and responding correctly."
